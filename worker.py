@@ -41,6 +41,16 @@ def _progress_hook(job_id):
     return hook
 
 
+def _final_filepath(ydl, info, tier):
+    downloads = info.get("requested_downloads") or []
+    if downloads and downloads[0].get("filepath"):
+        return downloads[0]["filepath"]
+    filepath = ydl.prepare_filename(info)
+    if tier["postprocessors"]:
+        filepath = os.path.splitext(filepath)[0] + ".mp3"
+    return filepath
+
+
 def _process_job(job_id, download_dir, ydl_factory=None):
     factory = ydl_factory or _default_ydl_factory
 
@@ -74,9 +84,7 @@ def _process_job(job_id, download_dir, ydl_factory=None):
     try:
         with factory(ydl_opts) as ydl:
             info = ydl.extract_info(job["url"], download=True)
-        filepath = ydl.prepare_filename(info)
-        if tier["postprocessors"]:
-            filepath = os.path.splitext(filepath)[0] + ".mp3"
+        filepath = _final_filepath(ydl, info, tier)
         height = info.get("height")
         resolved_quality = f"{height}p" if height else None
         with db.connect() as conn:

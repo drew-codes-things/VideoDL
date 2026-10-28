@@ -52,7 +52,8 @@ def set_security_headers(resp):
     resp.headers["Referrer-Policy"] = "no-referrer"
     resp.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
+        "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'",
     )
     return resp
 
