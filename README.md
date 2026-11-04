@@ -48,6 +48,8 @@ Then open `http://127.0.0.1:5002`.
 | `PORT` | Port to listen on. Default `5002`. |
 | `ALLOW_INSECURE` | Set `true` to allow binding to a non-loopback host without auth (e.g. behind a reverse proxy that handles auth). |
 | `DOWNLOAD_DIR` | Where finished files are saved. Default `./downloads`. |
+| `SECRET_KEY` | Flask session key. Set it to any long random string so the form's CSRF token survives restarts (a random one is generated otherwise). |
+| `VIDEODL_DB_PATH` | Optional override for the SQLite history file. Default `videodl.db` next to `app.py`. |
 
 The app refuses to bind to a non-loopback host unless auth is configured or
 `ALLOW_INSECURE=true` is set.
