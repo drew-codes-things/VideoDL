@@ -1,6 +1,7 @@
 import os
 import secrets
 import sys
+from datetime import datetime
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -23,6 +24,7 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", os.path.join(BASE_DIR, "downloads"))
 
 WEB_USERNAME = (os.getenv("WEB_USERNAME") or "").strip()
 WEB_PASSWORD = (os.getenv("WEB_PASSWORD") or "").strip()
+FINISHED_AT_FORMAT = "%a %d %b %Y, %H:%M"
 
 
 def auth_enabled():
@@ -167,7 +169,7 @@ thead tr { border-bottom: 1px solid var(--line-bright); }
 th { text-align: left; padding: 8px 6px; color: var(--text-dim); font-family: var(--sans); font-size: .78rem; }
 tbody tr { border-bottom: 1px solid var(--line); }
 td { padding: 10px 6px; vertical-align: top; word-break: break-word; }
-.status-pill { border-radius: 999px; padding: 2px 9px; font-size: .72rem; font-family: var(--sans); }
+.status-pill { border-radius: 999px; padding: 2px 9px; font-size: .72rem; font-family: var(--sans); white-space: nowrap; }
 .status-success { background: rgba(74, 222, 128, .12); color: var(--phosphor); }
 .status-error { background: rgba(229, 56, 59, .14); color: #f5c2c3; }
 .empty-state { color: var(--text-faint); padding: 20px 0; text-align: center; font-family: var(--sans); font-size: .85rem; }
@@ -280,7 +282,7 @@ PAGE_TEMPLATE = r"""
           <td>{{ job.title or job.url }}</td>
           <td>{{ job.quality_display }}</td>
           <td><span class="status-pill status-{{ job.status }}">{{ job.status }}</span></td>
-          <td>{{ job.finished_at or '' }}</td>
+          <td>{{ job.finished_display }}</td>
           <td>{% if job.status == 'success' %}{{ job.filepath }}{% else %}{{ job.error or '' }}{% endif %}</td>
         </tr>
       {% endfor %}
@@ -324,8 +326,19 @@ def _quality_display(job):
     return label
 
 
+def describe_finished_at(finished_at):
+    if not finished_at:
+        return ""
+    try:
+        finished = datetime.fromisoformat(finished_at)
+    except ValueError:
+        return finished_at
+    return finished.astimezone().strftime(FINISHED_AT_FORMAT)
+
+
 def _serialize_history_job(job):
-    return {**job, "quality_display": _quality_display(job)}
+    return {**job, "quality_display": _quality_display(job),
+            "finished_display": describe_finished_at(job.get("finished_at"))}
 
 
 def _render_index(error=None, submitted_urls=None, submitted_quality=None):
