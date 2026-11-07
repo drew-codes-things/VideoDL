@@ -50,6 +50,7 @@ Then open `http://127.0.0.1:5002`.
 | `PORT` | Port to listen on. Default `5002`. |
 | `ALLOW_INSECURE` | Set `true` to allow binding to a non-loopback host without auth (e.g. behind a reverse proxy that handles auth). |
 | `DOWNLOAD_DIR` | Where finished files are saved. Default `./downloads`. |
+| `YTDLP_AUTO_UPDATE` | `true` (default) updates yt-dlp every time VideoDL starts. |
 | `SECRET_KEY` | Flask session key. Set it to any long random string so the form's CSRF token survives restarts (a random one is generated otherwise). |
 | `VIDEODL_DB_PATH` | Optional override for the SQLite history file. Default `videodl.db` next to `app.py`. |
 
@@ -64,17 +65,26 @@ The app refuses to bind to a non-loopback host unless auth is configured or
 | 1080p / 720p / 480p | Caps resolution, falls back gracefully if a site doesn't offer that height |
 | Audio only (MP3) | Extracts audio and converts to MP3 via ffmpeg |
 
-## YouTube errors (HTTP 403)
+## Keeping yt-dlp updated
 
 YouTube changes how its player works every few weeks, and old copies of
-yt-dlp then fail with `HTTP Error 403: Forbidden`. VideoDL spots this and
-says so in the History panel. The fix is to update yt-dlp and restart:
+yt-dlp then fail with `HTTP Error 403: Forbidden`. Installing from GitHub
+only gets the yt-dlp that was newest on the day you installed, so VideoDL
+keeps it fresh itself:
+
+- Every time VideoDL starts it runs `pip install -U "yt-dlp[default]"` and,
+  if a newer version arrived, restarts itself to load it. Turn this off with
+  `YTDLP_AUTO_UPDATE=false` in `.env`.
+- A copy that stays running for weeks keeps the version it started with, so
+  restart it now and then (in Docker, `docker restart videodl` once a week
+  from cron or a systemd timer does it).
+- When YouTube still answers 403, the History panel says so and points here.
+
+To update by hand:
 
 ```bash
 pip install -U "yt-dlp[default]"
 ```
-
-If you run VideoDL as a long-lived service, schedule that update weekly.
 
 ## Tech
 

@@ -10,6 +10,7 @@ from markupsafe import Markup
 
 import db
 import worker
+import ytdlp_update
 from quality import QUALITY_TIERS, quality_choices, resolve_quality
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -406,6 +407,7 @@ def status():
 
 
 if __name__ == "__main__":
+    ytdlp_update.update_and_restart_if_needed(ytdlp_update.auto_update_enabled())
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     bind_host = os.getenv("BIND_HOST", "127.0.0.1")
