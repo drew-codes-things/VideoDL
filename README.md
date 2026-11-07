@@ -64,6 +64,18 @@ The app refuses to bind to a non-loopback host unless auth is configured or
 | 1080p / 720p / 480p | Caps resolution, falls back gracefully if a site doesn't offer that height |
 | Audio only (MP3) | Extracts audio and converts to MP3 via ffmpeg |
 
+## YouTube errors (HTTP 403)
+
+YouTube changes how its player works every few weeks, and old copies of
+yt-dlp then fail with `HTTP Error 403: Forbidden`. VideoDL spots this and
+says so in the History panel. The fix is to update yt-dlp and restart:
+
+```bash
+pip install -U "yt-dlp[default]"
+```
+
+If you run VideoDL as a long-lived service, schedule that update weekly.
+
 ## Tech
 
 - Flask web UI, SQLite for job/history persistence, a single background

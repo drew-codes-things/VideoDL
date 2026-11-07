@@ -2,6 +2,7 @@ import os
 import queue
 import threading
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import yt_dlp
 
@@ -13,6 +14,13 @@ _progress = {}
 _job_queue = queue.Queue()
 
 _default_ydl_factory = yt_dlp.YoutubeDL
+
+MAX_ERROR_LENGTH = 500
+YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
+YOUTUBE_BLOCKED_HINT = (
+    "YouTube refused the download, which usually means yt-dlp is out of date. "
+    "Run pip install -U \"yt-dlp[default]\" and restart VideoDL."
+)
 
 
 def _now():
@@ -39,6 +47,18 @@ def _progress_hook(job_id):
                 "eta": d.get("eta"),
             }
     return hook
+
+
+def is_youtube_url(url):
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == name or host.endswith("." + name) for name in YOUTUBE_HOSTS)
+
+
+def describe_error(exc, url):
+    message = str(exc)
+    if is_youtube_url(url) and "HTTP Error 403" in message:
+        message = f"{YOUTUBE_BLOCKED_HINT} ({message})"
+    return message[:MAX_ERROR_LENGTH]
 
 
 def _final_filepath(ydl, info, tier):
@@ -98,7 +118,7 @@ def _process_job(job_id, download_dir, ydl_factory=None):
             )
     except Exception as exc:
         with db.connect() as conn:
-            db.update_job(conn, job_id, status="error", error=str(exc)[:500], finished_at=_now())
+            db.update_job(conn, job_id, status="error", error=describe_error(exc, job["url"]), finished_at=_now())
     finally:
         with _progress_lock:
             _progress.pop(job_id, None)
