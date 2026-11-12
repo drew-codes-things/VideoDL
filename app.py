@@ -32,13 +32,17 @@ def auth_enabled():
     return bool(WEB_USERNAME and WEB_PASSWORD)
 
 
+def matches_secret(submitted, expected):
+    return secrets.compare_digest(submitted.encode("utf-8"), expected.encode("utf-8"))
+
+
 def requires_auth(view_func):
     @wraps(view_func)
     def wrapped(*args, **kwargs):
         if not auth_enabled():
             return view_func(*args, **kwargs)
         auth = request.authorization
-        if auth and secrets.compare_digest(auth.username or "", WEB_USERNAME) and secrets.compare_digest(auth.password or "", WEB_PASSWORD):
+        if auth and matches_secret(auth.username or "", WEB_USERNAME) and matches_secret(auth.password or "", WEB_PASSWORD):
             return view_func(*args, **kwargs)
         return Response(
             "Authentication required",
@@ -73,7 +77,7 @@ def has_valid_csrf(submitted_token):
     expected = session.get("_csrf_token")
     if not expected or not submitted_token:
         return False
-    return secrets.compare_digest(expected, submitted_token)
+    return matches_secret(submitted_token, expected)
 
 
 CSS = """
