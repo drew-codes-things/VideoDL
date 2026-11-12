@@ -16,6 +16,8 @@ _job_queue = queue.Queue()
 _default_ydl_factory = yt_dlp.YoutubeDL
 
 MAX_ERROR_LENGTH = 500
+MAX_TITLE_BYTES_IN_FILE_NAME = 150
+OUTPUT_NAME_TEMPLATE = f"%(title).{MAX_TITLE_BYTES_IN_FILE_NAME}B [%(id)s].%(ext)s"
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
 YOUTUBE_BLOCKED_HINT = (
     "YouTube refused the download, which usually means yt-dlp is out of date. "
@@ -71,6 +73,10 @@ def _final_filepath(ydl, info, tier):
     return filepath
 
 
+def output_template(download_dir):
+    return os.path.join(download_dir, OUTPUT_NAME_TEMPLATE)
+
+
 def _process_job(job_id, download_dir, ydl_factory=None):
     factory = ydl_factory or _default_ydl_factory
 
@@ -89,19 +95,18 @@ def _process_job(job_id, download_dir, ydl_factory=None):
             "eta": None,
         }
 
-    tier = resolve_quality(job["quality"])
-    ydl_opts = {
-        "format": tier["format"],
-        "outtmpl": os.path.join(download_dir, "%(title)s [%(id)s].%(ext)s"),
-        "merge_output_format": "mp4",
-        "postprocessors": tier["postprocessors"],
-        "progress_hooks": [_progress_hook(job_id)],
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-    }
-
     try:
+        tier = resolve_quality(job["quality"])
+        ydl_opts = {
+            "format": tier["format"],
+            "outtmpl": output_template(download_dir),
+            "merge_output_format": "mp4",
+            "postprocessors": tier["postprocessors"],
+            "progress_hooks": [_progress_hook(job_id)],
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+        }
         with factory(ydl_opts) as ydl:
             info = ydl.extract_info(job["url"], download=True)
         filepath = _final_filepath(ydl, info, tier)
@@ -124,25 +129,32 @@ def _process_job(job_id, download_dir, ydl_factory=None):
             _progress.pop(job_id, None)
 
 
+def _process_next_job(download_dir):
+    job_id = _job_queue.get()
+    try:
+        _process_job(job_id, download_dir)
+    except Exception as exc:
+        print(f"ERROR: job {job_id} stopped unexpectedly: {exc!r}", flush=True)
+    finally:
+        _job_queue.task_done()
+
+
 def _worker_loop(download_dir):
     while True:
-        job_id = _job_queue.get()
-        try:
-            _process_job(job_id, download_dir)
-        finally:
-            _job_queue.task_done()
+        _process_next_job(download_dir)
 
 
-def _recover_stalled_jobs():
+def _recover_unfinished_jobs():
     with db.connect() as conn:
-        stalled_ids = db.reset_stalled_jobs(conn)
-    for job_id in stalled_ids:
+        db.reset_stalled_jobs(conn)
+        unfinished_ids = [job["id"] for job in db.list_active_jobs(conn)]
+    for job_id in unfinished_ids:
         enqueue(job_id)
-    return stalled_ids
+    return unfinished_ids
 
 
 def start_worker(download_dir):
-    _recover_stalled_jobs()
+    _recover_unfinished_jobs()
     thread = threading.Thread(target=_worker_loop, args=(download_dir,), daemon=True)
     thread.start()
     return thread
