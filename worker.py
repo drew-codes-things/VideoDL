@@ -22,7 +22,8 @@ _default_ydl_factory = yt_dlp.YoutubeDL
 
 MAX_ERROR_LENGTH = 500
 MAX_TITLE_BYTES_IN_FILE_NAME = 150
-OUTPUT_NAME_TEMPLATE = f"%(title).{MAX_TITLE_BYTES_IN_FILE_NAME}B [%(id)s].%(ext)s"
+MAX_ID_BYTES_IN_FILE_NAME = 60
+OUTPUT_NAME_TEMPLATE = f"%(title).{MAX_TITLE_BYTES_IN_FILE_NAME}B [%(id).{MAX_ID_BYTES_IN_FILE_NAME}B].%(ext)s"
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
 YOUTUBE_BLOCKED_HINT = (
     "YouTube refused the download, which usually means yt-dlp is out of date. "

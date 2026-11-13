@@ -121,3 +121,13 @@ def test_a_database_from_before_attempts_were_counted_is_upgraded(tmp_path, monk
     assert worker._recover_unfinished_jobs() == [1]
     with db.connect() as conn:
         assert db.get_job(conn, 1)["attempts"] == 0
+
+
+def test_a_very_long_id_still_gives_a_file_name_the_disk_accepts(tmp_path):
+    options = {"outtmpl": worker.output_template(str(tmp_path)), "quiet": True}
+    with yt_dlp.YoutubeDL(options) as ydl:
+        path = ydl.prepare_filename({"title": "long post text " * 40, "id": "L" * 240, "ext": "mp4"})
+    part_file_name = os.path.basename(path) + ".f137.mp4.part"
+    assert len(part_file_name.encode()) <= LINUX_FILE_NAME_LIMIT_BYTES
+    with open(path, "w") as handle:
+        handle.write("")
