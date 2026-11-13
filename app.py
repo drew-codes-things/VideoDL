@@ -273,6 +273,10 @@ td[data-label="File / Error"] { color: var(--muted); font-family: var(--mono); f
     textarea, select { font-size: 16px; }
     select, .home-button { height: var(--touch); }
 }
+@media (max-width: 820px), (pointer: coarse) {
+    textarea, select { font-size: 16px; min-height: 44px; }
+    .home-button { min-height: 44px; }
+}
 """
 
 STATUS_JS = """
