@@ -35,6 +35,8 @@ DEFAULT_MAX_DOWNLOAD_MB = 4096
 DEFAULT_MAX_VIDEO_MINUTES = 240
 DEFAULT_MIN_FREE_MB = 2048
 SOCKET_TIMEOUT_SECONDS = 30
+FRAGMENT_SUFFIX = "-Frag"
+RESUME_STATE_SUFFIX = ".ytdl"
 REFUSED_LIVE_STATUSES = ("is_live", "is_upcoming")
 MULTI_VIDEO_TYPES = ("playlist", "multi_video")
 PRIVATE_MEDIA_REFUSAL = "This video is served from a private or local address, which VideoDL does not fetch."
@@ -189,11 +191,22 @@ class DownloadGuard:
             if path:
                 self.written_paths.add(path)
 
+    def _leftovers_of(self, path):
+        folder, name = os.path.split(path)
+        if not os.path.isdir(folder):
+            return []
+        return [
+            os.path.join(folder, other)
+            for other in os.listdir(folder)
+            if other == name or other.startswith(name + FRAGMENT_SUFFIX) or other == name + RESUME_STATE_SUFFIX
+        ]
+
     def remove_partial_files(self):
-        for path in self.written_paths:
-            inside_download_dir = os.path.realpath(path).startswith(self.download_dir + os.sep)
-            if inside_download_dir and os.path.isfile(path):
-                os.remove(path)
+        for written_path in self.written_paths:
+            for path in self._leftovers_of(written_path):
+                inside_download_dir = os.path.realpath(path).startswith(self.download_dir + os.sep)
+                if inside_download_dir and os.path.isfile(path):
+                    os.remove(path)
 
 
 def _now():

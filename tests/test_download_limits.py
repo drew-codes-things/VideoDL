@@ -126,3 +126,16 @@ def test_a_bad_limit_setting_is_reported_by_name(monkeypatch, name, value):
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=name):
         worker.limits_from_env()
+
+
+def test_a_stopped_fragment_download_leaves_no_fragments_behind(scratch, monkeypatch):
+    monkeypatch.setenv("MAX_DOWNLOAD_MB", "1")
+
+    def write_fragment_leftovers(chunk_number):
+        part = next(name for name in os.listdir(scratch) if name.endswith(".part"))
+        for leftover in (f"{part}-Frag{chunk_number + 1}", part[: -len(".part")] + ".ytdl"):
+            (scratch / leftover).write_bytes(b"\0")
+
+    (scratch / "earlier download [old].mp4").write_bytes(b"keep me")
+    run_job(scratch, fake_factory(PLAIN_VIDEO, chunk_count=40, after_chunk=write_fragment_leftovers))
+    assert os.listdir(scratch) == ["earlier download [old].mp4"]
