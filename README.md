@@ -52,6 +52,7 @@ Then open `http://127.0.0.1:5002`.
 | `DOWNLOAD_DIR` | Where finished files are saved. Default `./downloads`. |
 | `YTDLP_AUTO_UPDATE` | `true` (default) updates yt-dlp every time VideoDL starts. |
 | `SECRET_KEY` | Flask session key. Set it to any long random string so the form's CSRF token survives restarts (a random one is generated otherwise). |
+| `SESSION_COOKIE_SECURE` | Set `true` when VideoDL is served over HTTPS (for example behind a reverse proxy) so the session cookie is only sent over HTTPS. Default `false`. |
 | `VIDEODL_DB_PATH` | Optional override for the SQLite history file. Default `videodl.db` next to `app.py`. |
 | `MAX_DOWNLOAD_MB` | Largest download allowed, in MB. A video known to be bigger is refused, and a download that grows past it is stopped and its partial file deleted. Default `4096`. |
 | `MAX_VIDEO_MINUTES` | Longest video allowed, in minutes. Default `240`. |
@@ -103,6 +104,15 @@ To update by hand:
 ```bash
 pip install -U "yt-dlp[default]"
 ```
+
+## Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+The tests fake yt-dlp and DNS, so they download nothing and need no network.
 
 ## Tech
 
