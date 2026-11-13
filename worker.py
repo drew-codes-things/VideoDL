@@ -14,6 +14,8 @@ from quality import resolve_quality
 _progress_lock = threading.Lock()
 _progress = {}
 _job_queue = queue.Queue()
+_cancel_lock = threading.Lock()
+_cancel_requested = set()
 
 _default_ydl_factory = yt_dlp.YoutubeDL
 
@@ -33,10 +35,15 @@ DEFAULT_MIN_FREE_MB = 2048
 SOCKET_TIMEOUT_SECONDS = 30
 REFUSED_LIVE_STATUSES = ("is_live", "is_upcoming")
 LIVE_STREAM_REFUSAL = "Live streams can't be downloaded. Try again once the stream has ended and been saved."
+CANCELLED_MESSAGE = "Cancelled."
 
 
 class JobStopped(yt_dlp.utils.DownloadCancelled):
-    pass
+    status = "error"
+
+
+class JobCancelled(JobStopped):
+    status = "cancelled"
 
 
 @dataclass(frozen=True)
@@ -105,8 +112,36 @@ def refusal_reason(info, limits, free_bytes):
     return None
 
 
+def cancel_job(job_id):
+    with db.connect() as conn:
+        if db.cancel_queued_job(conn, job_id, _now()):
+            return True
+        job = db.get_job(conn, job_id)
+    if job is None or job["status"] != "downloading":
+        return False
+    with _cancel_lock:
+        _cancel_requested.add(job_id)
+    return True
+
+
+def is_cancel_requested(job_id):
+    with _cancel_lock:
+        return job_id in _cancel_requested
+
+
+def _forget_cancel_request(job_id):
+    with _cancel_lock:
+        _cancel_requested.discard(job_id)
+
+
+def stop_if_cancelled(job_id):
+    if is_cancel_requested(job_id):
+        raise JobCancelled(CANCELLED_MESSAGE)
+
+
 class DownloadGuard:
-    def __init__(self, download_dir, limits):
+    def __init__(self, job_id, download_dir, limits):
+        self.job_id = job_id
         self.download_dir = os.path.realpath(download_dir)
         self.limits = limits
         self.bytes_by_file = {}
@@ -116,6 +151,7 @@ class DownloadGuard:
         if progress.get("status") != "downloading":
             return
         self._remember(progress)
+        stop_if_cancelled(self.job_id)
         downloaded = sum(self.bytes_by_file.values())
         if downloaded > self.limits.max_bytes:
             raise JobStopped(
@@ -208,6 +244,7 @@ def _download(job, download_dir, tier, factory, limits, guard):
         refusal = refusal_reason(probed, limits, _free_bytes(download_dir))
         if refusal:
             raise JobStopped(refusal)
+        stop_if_cancelled(job["id"])
         info = ydl.process_ie_result(probed, download=True)
         return info, _final_filepath(ydl, info, tier)
 
@@ -217,9 +254,8 @@ def _process_job(job_id, download_dir, ydl_factory=None, limits=None):
 
     with db.connect() as conn:
         job = db.get_job(conn, job_id)
-        if job is None:
+        if job is None or not db.claim_queued_job(conn, job_id, _now()):
             return
-        db.update_job(conn, job_id, status="downloading", started_at=_now())
 
     with _progress_lock:
         _progress[job_id] = {
@@ -233,7 +269,7 @@ def _process_job(job_id, download_dir, ydl_factory=None, limits=None):
     guard = None
     try:
         limits = limits or limits_from_env()
-        guard = DownloadGuard(download_dir, limits)
+        guard = DownloadGuard(job_id, download_dir, limits)
         tier = resolve_quality(job["quality"])
         info, filepath = _download(job, download_dir, tier, factory, limits, guard)
         height = info.get("height")
@@ -250,11 +286,12 @@ def _process_job(job_id, download_dir, ydl_factory=None, limits=None):
     except JobStopped as stop:
         guard.remove_partial_files()
         with db.connect() as conn:
-            db.update_job(conn, job_id, status="error", error=str(stop)[:MAX_ERROR_LENGTH], finished_at=_now())
+            db.update_job(conn, job_id, status=stop.status, error=str(stop)[:MAX_ERROR_LENGTH], finished_at=_now())
     except Exception as exc:
         with db.connect() as conn:
             db.update_job(conn, job_id, status="error", error=describe_error(exc, job["url"]), finished_at=_now())
     finally:
+        _forget_cancel_request(job_id)
         with _progress_lock:
             _progress.pop(job_id, None)
 

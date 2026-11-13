@@ -204,6 +204,21 @@ textarea:focus, select:focus { outline: none; border-color: var(--focus); box-sh
 }
 .home-button:hover { background: var(--accent-fill-hover); }
 .home-button:active { transform: scale(.97); }
+.cancel-form { margin: 8px 0 0; }
+.secondary-button {
+    height: 28px;
+    padding: 0 12px;
+    font-family: var(--sans);
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    transition: border-color var(--dur) var(--ease);
+}
+.secondary-button:hover { border-color: var(--line-control); }
 .warning-banner {
     background: var(--accent-tint);
     color: var(--accent-text);
@@ -231,6 +246,7 @@ td[data-label="File / Error"] { color: var(--muted); font-family: var(--mono); f
 .status-pill { display: inline-block; border-radius: var(--r-pill); padding: 2px 10px; font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; }
 .status-success { background: var(--ok-tint); color: var(--ok); }
 .status-error { background: var(--accent-tint); color: var(--accent-text); }
+.status-cancelled { background: var(--line); color: var(--muted); }
 .empty-state { color: var(--muted); padding: 16px; border: 1px dashed var(--line-strong); border-radius: var(--r-lg); text-align: center; }
 @keyframes rise-in { from { opacity: 0; transform: translateY(8px); } }
 @media (prefers-reduced-motion: reduce) {
@@ -339,6 +355,10 @@ PAGE_TEMPLATE = r"""
         <div class="queue-item-title">{{ job.title or job.url }}</div>
         <div class="queue-progress-track"><div class="queue-progress-fill" style="width:{{ job.progress_pct }}%"></div></div>
         <div class="queue-item-meta" data-role="meta">{{ job.status }} - {{ job.progress_pct }}%</div>
+        <form method="post" action="/jobs/{{ job.id }}/cancel" class="cancel-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="secondary-button">Cancel</button>
+        </form>
       </div>
       {% endfor %}
     </div>
@@ -467,6 +487,15 @@ def add_jobs():
             job_id = db.create_job(conn, url, quality)
             worker.enqueue(job_id)
 
+    return redirect("/")
+
+
+@app.route("/jobs/<int:job_id>/cancel", methods=["POST"])
+@requires_auth
+def cancel_job(job_id):
+    if not has_valid_csrf(request.form.get("csrf_token")):
+        return Response("Invalid CSRF token", status=403)
+    worker.cancel_job(job_id)
     return redirect("/")
 
 

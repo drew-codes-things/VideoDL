@@ -88,9 +88,27 @@ def list_active_jobs(conn):
     return [dict(r) for r in rows]
 
 
+def claim_queued_job(conn, job_id, started_at):
+    cur = conn.execute(
+        "UPDATE jobs SET status = 'downloading', started_at = ? WHERE id = ? AND status = 'queued'",
+        (started_at, job_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def cancel_queued_job(conn, job_id, finished_at):
+    cur = conn.execute(
+        "UPDATE jobs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'queued'",
+        (finished_at, job_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
 def list_history(conn, limit=200):
     rows = conn.execute(
-        "SELECT * FROM jobs WHERE status IN ('success', 'error') ORDER BY id DESC LIMIT ?",
+        "SELECT * FROM jobs WHERE status IN ('success', 'error', 'cancelled') ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
