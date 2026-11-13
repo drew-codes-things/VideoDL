@@ -9,6 +9,7 @@ from flask import Flask, Response, jsonify, redirect, render_template_string, re
 from markupsafe import Markup
 
 import db
+import links
 import worker
 import ytdlp_update
 from quality import QUALITY_TIERS, quality_choices, resolve_quality
@@ -26,6 +27,9 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", os.path.join(BASE_DIR, "downloads"))
 WEB_USERNAME = (os.getenv("WEB_USERNAME") or "").strip()
 WEB_PASSWORD = (os.getenv("WEB_PASSWORD") or "").strip()
 FINISHED_AT_FORMAT = "%a %d %b %Y, %H:%M"
+MAX_URLS_PER_SUBMIT = 50
+MAX_FORM_BYTES = 512 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_FORM_BYTES
 
 
 def auth_enabled():
@@ -460,6 +464,22 @@ def index():
     return _render_index()
 
 
+@app.errorhandler(413)
+def form_too_large(error):
+    return Response(f"The form was larger than {MAX_FORM_BYTES // 1024} KB. Paste fewer links at a time.",
+                    status=413, mimetype="text/plain")
+
+
+def first_link_problem(urls):
+    if len(urls) > MAX_URLS_PER_SUBMIT:
+        return f"Paste at most {MAX_URLS_PER_SUBMIT} links at a time ({len(urls)} were pasted)."
+    for line_number, url in enumerate(urls, start=1):
+        problem = links.link_refusal(url)
+        if problem:
+            return f"Line {line_number} {problem}. Nothing was added."
+    return None
+
+
 @app.route("/jobs", methods=["POST"])
 @requires_auth
 def add_jobs():
@@ -478,6 +498,14 @@ def add_jobs():
     if not urls:
         return _render_index(
             error="Paste at least one URL.",
+            submitted_urls=raw_urls,
+            submitted_quality=quality,
+        ), 400
+
+    link_problem = first_link_problem(urls)
+    if link_problem:
+        return _render_index(
+            error=link_problem,
             submitted_urls=raw_urls,
             submitted_quality=quality,
         ), 400

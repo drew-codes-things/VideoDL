@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import yt_dlp
 
 import db
+import links
 from quality import resolve_quality
 
 _progress_lock = threading.Lock()
@@ -35,6 +36,7 @@ DEFAULT_MIN_FREE_MB = 2048
 SOCKET_TIMEOUT_SECONDS = 30
 REFUSED_LIVE_STATUSES = ("is_live", "is_upcoming")
 MULTI_VIDEO_TYPES = ("playlist", "multi_video")
+PRIVATE_MEDIA_REFUSAL = "This video is served from a private or local address, which VideoDL does not fetch."
 PLAYLIST_REFUSAL = (
     "This link is a playlist, channel or page with several videos. "
     "VideoDL downloads one video per link, so paste the links of the videos you want."
@@ -107,9 +109,16 @@ def _free_space_refusal(free_bytes, limits):
     )
 
 
+def _media_urls(info):
+    pieces = info.get("requested_formats") or [info]
+    return [piece["url"] for piece in pieces if piece.get("url")]
+
+
 def refusal_reason(info, limits, free_bytes):
     if info.get("_type") in MULTI_VIDEO_TYPES:
         return PLAYLIST_REFUSAL
+    if any(links.address_refusal(url) for url in _media_urls(info)):
+        return PRIVATE_MEDIA_REFUSAL
     if _is_live(info):
         return LIVE_STREAM_REFUSAL
     duration = info.get("duration")
@@ -242,6 +251,9 @@ def output_template(download_dir):
 
 
 def _download(job, download_dir, tier, factory, limits, guard):
+    link_problem = links.link_refusal(job["url"])
+    if link_problem:
+        raise JobStopped(f"This link {link_problem}.")
     ydl_opts = {
         "format": tier["format"],
         "outtmpl": output_template(download_dir),

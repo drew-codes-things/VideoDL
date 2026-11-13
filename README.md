@@ -65,6 +65,12 @@ never finish and would hold the single download slot for good. Playlist,
 channel and other links that hold several videos are refused too: paste the
 link of each video you want.
 
+Only `http://` and `https://` links to public hosts are accepted, at most 50
+per submit and 2000 characters each. Links whose host resolves to a private,
+loopback or link-local address (your LAN, the server itself) are refused, both
+when they are added and again just before they are downloaded, so VideoDL
+cannot be used to fetch pages from inside your network.
+
 Each job in the Queue has a Cancel button. A download that a restart
 interrupts is tried once more; if a second restart interrupts it as well,
 it is marked as failed instead of being queued again.
