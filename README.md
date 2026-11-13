@@ -53,9 +53,15 @@ Then open `http://127.0.0.1:5002`.
 | `YTDLP_AUTO_UPDATE` | `true` (default) updates yt-dlp every time VideoDL starts. |
 | `SECRET_KEY` | Flask session key. Set it to any long random string so the form's CSRF token survives restarts (a random one is generated otherwise). |
 | `VIDEODL_DB_PATH` | Optional override for the SQLite history file. Default `videodl.db` next to `app.py`. |
+| `MAX_DOWNLOAD_MB` | Largest download allowed, in MB. A video known to be bigger is refused, and a download that grows past it is stopped and its partial file deleted. Default `4096`. |
+| `MAX_VIDEO_MINUTES` | Longest video allowed, in minutes. Default `240`. |
+| `MIN_FREE_MB` | Disk space to keep free in `DOWNLOAD_DIR`, in MB. A download that would go below it is refused or stopped. `0` turns the check off. Default `2048`. |
 
 The app refuses to bind to a non-loopback host unless auth is configured or
 `ALLOW_INSECURE=true` is set.
+
+Live streams (and streams that have not started yet) are refused, since they
+never finish and would hold the single download slot for good.
 
 ## Quality tiers
 
