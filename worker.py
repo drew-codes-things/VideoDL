@@ -34,6 +34,11 @@ DEFAULT_MAX_VIDEO_MINUTES = 240
 DEFAULT_MIN_FREE_MB = 2048
 SOCKET_TIMEOUT_SECONDS = 30
 REFUSED_LIVE_STATUSES = ("is_live", "is_upcoming")
+MULTI_VIDEO_TYPES = ("playlist", "multi_video")
+PLAYLIST_REFUSAL = (
+    "This link is a playlist, channel or page with several videos. "
+    "VideoDL downloads one video per link, so paste the links of the videos you want."
+)
 LIVE_STREAM_REFUSAL = "Live streams can't be downloaded. Try again once the stream has ended and been saved."
 CANCELLED_MESSAGE = "Cancelled."
 MAX_START_ATTEMPTS = 2
@@ -103,6 +108,8 @@ def _free_space_refusal(free_bytes, limits):
 
 
 def refusal_reason(info, limits, free_bytes):
+    if info.get("_type") in MULTI_VIDEO_TYPES:
+        return PLAYLIST_REFUSAL
     if _is_live(info):
         return LIVE_STREAM_REFUSAL
     duration = info.get("duration")
@@ -220,10 +227,13 @@ def describe_error(exc, url):
 def _final_filepath(ydl, info, tier):
     downloads = info.get("requested_downloads") or []
     if downloads and downloads[0].get("filepath"):
-        return downloads[0]["filepath"]
-    filepath = ydl.prepare_filename(info)
-    if tier["postprocessors"]:
-        filepath = os.path.splitext(filepath)[0] + ".mp3"
+        filepath = downloads[0]["filepath"]
+    else:
+        filepath = ydl.prepare_filename(info)
+        if tier["postprocessors"]:
+            filepath = os.path.splitext(filepath)[0] + ".mp3"
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"yt-dlp finished but the file it reported is missing: {filepath}")
     return filepath
 
 
@@ -239,6 +249,8 @@ def _download(job, download_dir, tier, factory, limits, guard):
         "postprocessors": tier["postprocessors"],
         "progress_hooks": [_progress_hook(job["id"]), guard],
         "noplaylist": True,
+        "extract_flat": "in_playlist",
+        "playlistend": 1,
         "socket_timeout": SOCKET_TIMEOUT_SECONDS,
         "quiet": True,
         "no_warnings": True,

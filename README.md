@@ -61,7 +61,9 @@ The app refuses to bind to a non-loopback host unless auth is configured or
 `ALLOW_INSECURE=true` is set.
 
 Live streams (and streams that have not started yet) are refused, since they
-never finish and would hold the single download slot for good.
+never finish and would hold the single download slot for good. Playlist,
+channel and other links that hold several videos are refused too: paste the
+link of each video you want.
 
 Each job in the Queue has a Cancel button. A download that a restart
 interrupts is tried once more; if a second restart interrupts it as well,
