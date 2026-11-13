@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT,
     queued_at TEXT NOT NULL,
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 """
@@ -36,8 +37,15 @@ def get_connection():
     return conn
 
 
+def _add_missing_columns(conn):
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "attempts" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+
+
 def init_db(conn):
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     conn.commit()
 
 
@@ -90,7 +98,8 @@ def list_active_jobs(conn):
 
 def claim_queued_job(conn, job_id, started_at):
     cur = conn.execute(
-        "UPDATE jobs SET status = 'downloading', started_at = ? WHERE id = ? AND status = 'queued'",
+        "UPDATE jobs SET status = 'downloading', started_at = ?, attempts = attempts + 1 "
+        "WHERE id = ? AND status = 'queued'",
         (started_at, job_id),
     )
     conn.commit()
@@ -114,10 +123,13 @@ def list_history(conn, limit=200):
     return [dict(r) for r in rows]
 
 
-def reset_stalled_jobs(conn):
+def reset_stalled_jobs(conn, max_attempts, gave_up_message):
+    conn.execute(
+        "UPDATE jobs SET status = 'error', error = ?, finished_at = ? WHERE status = 'downloading' AND attempts >= ?",
+        (gave_up_message, _now(), max_attempts),
+    )
     rows = conn.execute("SELECT id FROM jobs WHERE status = 'downloading'").fetchall()
     ids = [row["id"] for row in rows]
-    if ids:
-        conn.execute("UPDATE jobs SET status = 'queued' WHERE status = 'downloading'")
-        conn.commit()
+    conn.execute("UPDATE jobs SET status = 'queued' WHERE status = 'downloading'")
+    conn.commit()
     return ids

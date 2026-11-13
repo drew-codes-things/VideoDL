@@ -63,6 +63,10 @@ The app refuses to bind to a non-loopback host unless auth is configured or
 Live streams (and streams that have not started yet) are refused, since they
 never finish and would hold the single download slot for good.
 
+Each job in the Queue has a Cancel button. A download that a restart
+interrupts is tried once more; if a second restart interrupts it as well,
+it is marked as failed instead of being queued again.
+
 ## Quality tiers
 
 | Label | What it does |

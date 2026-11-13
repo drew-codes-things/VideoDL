@@ -36,6 +36,10 @@ SOCKET_TIMEOUT_SECONDS = 30
 REFUSED_LIVE_STATUSES = ("is_live", "is_upcoming")
 LIVE_STREAM_REFUSAL = "Live streams can't be downloaded. Try again once the stream has ended and been saved."
 CANCELLED_MESSAGE = "Cancelled."
+MAX_START_ATTEMPTS = 2
+GAVE_UP_AFTER_RESTARTS = (
+    f"A restart interrupted this download {MAX_START_ATTEMPTS} times, so it was not tried again."
+)
 
 
 class JobStopped(yt_dlp.utils.DownloadCancelled):
@@ -313,7 +317,7 @@ def _worker_loop(download_dir):
 
 def _recover_unfinished_jobs():
     with db.connect() as conn:
-        db.reset_stalled_jobs(conn)
+        db.reset_stalled_jobs(conn, MAX_START_ATTEMPTS, GAVE_UP_AFTER_RESTARTS)
         unfinished_ids = [job["id"] for job in db.list_active_jobs(conn)]
     for job_id in unfinished_ids:
         enqueue(job_id)
