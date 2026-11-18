@@ -1,5 +1,7 @@
+import contextlib
 import os
 import secrets
+import tempfile
 from datetime import datetime
 from functools import wraps
 
@@ -61,28 +63,43 @@ def read_secure_cookies():
     return choice
 
 
-def saved_sign_in_secret():
+def usable_secret(secret, source):
+    if len(secret) < SECRET_BYTES:
+        raise SystemExit(f"{source} holds {len(secret)} bytes, fewer than the {SECRET_BYTES} the sign-in key needs; "
+                         "set a longer SECRET_KEY, or stop VideoDL, delete the secret_key file and start it again")
+    return secret
+
+
+def save_secret_file_unless_present(path):
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".secret-", dir=folder)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(secrets.token_hex(SECRET_BYTES).encode())
+        with contextlib.suppress(FileExistsError):
+            os.link(temporary, path)
+    finally:
+        os.unlink(temporary)
+
+
+def load_or_create_secret_file(path):
+    if not os.path.exists(path):
+        save_secret_file_unless_present(path)
+    with open(path, "rb") as handle:
+        return usable_secret(handle.read(), path)
+
+
+def sign_in_secret():
+    if sign_in_method() != "builtin":
+        return secrets.token_hex(SECRET_BYTES).encode()
     configured = (os.getenv("SECRET_KEY") or "").strip()
     if configured:
-        return configured.encode()
-    path = os.path.join(state_dir(), SECRET_FILE_NAME)
-    if os.path.exists(path):
-        with open(path, "rb") as handle:
-            return handle.read()
-    return secrets.token_hex(SECRET_BYTES).encode()
+        return usable_secret(configured.encode(), "SECRET_KEY")
+    return load_or_create_secret_file(os.path.join(state_dir(), SECRET_FILE_NAME))
 
 
-def keep_sign_in_secret(secret):
-    path = os.path.join(state_dir(), SECRET_FILE_NAME)
-    if (os.getenv("SECRET_KEY") or "").strip() or os.path.exists(path):
-        return
-    os.makedirs(state_dir(), exist_ok=True)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(secret)
-
-
-OWN_SIGN_IN = PasswordAuth(OwnerAccount(os.path.join(state_dir(), OWNER_FILE_NAME)), saved_sign_in_secret(),
+OWN_SIGN_IN = PasswordAuth(OwnerAccount(os.path.join(state_dir(), OWNER_FILE_NAME)), sign_in_secret(),
                            OWN_SESSION_COOKIE, read_secure_cookies())
 add_sign_in_pages(app, OWN_SIGN_IN, "VideoDL")
 
@@ -615,8 +632,6 @@ if __name__ == "__main__":
     bind_host = os.getenv("BIND_HOST", "127.0.0.1")
     bind_port = int(os.getenv("PORT", "5002"))
     method = sign_in_method()
-    if method == "builtin":
-        keep_sign_in_secret(OWN_SIGN_IN.secret)
 
     worker.start_worker(DOWNLOAD_DIR)
 

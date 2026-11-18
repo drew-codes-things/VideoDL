@@ -94,7 +94,7 @@ Other ways to sign in:
 | `SECURE_COOKIES` | `auto` (default): the own sign-in's cookie is `Secure` except on plain `http` to `localhost`, `127.0.0.1` or `[::1]`. `true` or `false` force it. |
 | `DOWNLOAD_DIR` | Where finished files are saved. Default `./downloads`. |
 | `YTDLP_AUTO_UPDATE` | `true` (default) updates yt-dlp every time VideoDL starts. |
-| `SECRET_KEY` | Flask session key and the key that signs the own sign-in's cookie. Set it to any long random string so the form's CSRF token survives restarts. Without it the sign-in key is kept in `secret_key` next to `videodl.db`. |
+| `SECRET_KEY` | Flask session key and the key that signs the own sign-in's cookie. Set it to any long random string so the form's CSRF token survives restarts. Without it the sign-in key is kept in `secret_key` next to `videodl.db`. With the own sign-in a key shorter than 32 bytes stops VideoDL at start-up. |
 | `SESSION_COOKIE_SECURE` | Set `true` when VideoDL is served over HTTPS (for example behind a reverse proxy) so the session cookie is only sent over HTTPS. Default `false`. |
 | `VIDEODL_DB_PATH` | Optional override for the SQLite history file. Default `videodl.db` next to `app.py`. The owner account (`owner.json`) and `secret_key` live in the same folder. |
 | `MAX_DOWNLOAD_MB` | Largest download allowed, in MB. A video known to be bigger is refused, and a download that grows past it is stopped and its partial file deleted. Default `4096`. |

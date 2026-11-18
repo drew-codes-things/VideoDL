@@ -1,5 +1,6 @@
 import os
 import stat
+import subprocess
 import sys
 
 import pytest
@@ -10,6 +11,7 @@ import app
 import db
 from signin import SESSION_SECONDS, FailureLimiter, OwnerAccount
 
+REPO = os.path.join(os.path.dirname(__file__), "..")
 COOKIE = "videodl_session"
 OWNER_NAME = "owner"
 PASSWORD = "correct horse battery"
@@ -137,3 +139,41 @@ def test_basic_credentials_still_win_when_set(web, monkeypatch):
     assert app.sign_in_method() == "basic"
     assert web.get("/").status_code == 401
     assert web.get("/setup").status_code == 404
+
+
+def import_app(tmp_path, shown="app.OWN_SIGN_IN.secret.decode()", **settings):
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "VIDEODL_DB_PATH": str(tmp_path / "state" / "videodl.db"),
+           "DOWNLOAD_DIR": str(tmp_path / "downloads"), "YTDLP_AUTO_UPDATE": "false"}
+    env.update(settings)
+    return subprocess.run([sys.executable, "-c", f"import app; print({shown})"], cwd=REPO, env=env, capture_output=True,
+                          text=True, timeout=60)
+
+
+def test_the_sign_in_key_is_saved_and_reused_when_imported(tmp_path):
+    first = import_app(tmp_path)
+    second = import_app(tmp_path)
+    assert first.returncode == 0, first.stderr
+    key_file = tmp_path / "state" / "secret_key"
+    assert stat.S_IMODE(os.stat(key_file).st_mode) == 0o600
+    assert first.stdout.strip() == second.stdout.strip() == key_file.read_text()
+
+
+@pytest.mark.parametrize("settings", [{"SECRET_KEY": "a"}, {"SECRET_KEY": "y" * 31}])
+def test_a_short_sign_in_key_is_refused(tmp_path, settings):
+    started = import_app(tmp_path, **settings)
+    assert started.returncode != 0
+    assert "SECRET_KEY holds" in started.stderr
+
+
+def test_a_short_key_file_is_refused(tmp_path):
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "secret_key").write_bytes(b"short")
+    started = import_app(tmp_path)
+    assert started.returncode != 0
+    assert "fewer than the 32" in started.stderr
+
+
+def test_the_gate_and_basic_modes_need_no_key_file_and_take_any_key(tmp_path):
+    assert import_app(tmp_path, ALLOW_INSECURE="true", SECRET_KEY="a", TRUSTED_PROXIES="0.0.0.0/0").returncode == 0
+    assert import_app(tmp_path, WEB_USERNAME="basic-user", WEB_PASSWORD="a long basic password").returncode == 0
+    assert not (tmp_path / "state" / "secret_key").exists()
