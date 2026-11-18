@@ -67,11 +67,12 @@ How it is protected:
   that address out for the rest of the 15 minutes (`429`). Attempts sent
   at once are counted before they are checked, IPv6 addresses count by
   their `/64` network, and after 100 failures from everywhere within 15
-  minutes every address gets one try. A right password from a locked
-  address is refused too.
+  minutes every network gets one try (IPv4 by `/24`, IPv6 by `/48`). A
+  right password from a locked address is refused too.
 - A browser that has signed in before keeps a signed device cookie and has
   its own 5 tries, so a stranger who locks out your address (or the
   address of the proxy in front) cannot lock you out of that browser.
+  During an attack from many networks that browser is the way in.
   Making a new owner account ends every device cookie of the old one.
 - The session cookie is `HttpOnly`, `SameSite=Lax` and signed with the app's
   secret key (`SECRET_KEY`, or `secret_key` next to `videodl.db`, made on

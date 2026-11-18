@@ -47,6 +47,8 @@ STRICT_FAILURES_PER_ADDRESS = 1
 FAILURE_WINDOW_SECONDS = 15 * 60
 MAX_TRACKED_ADDRESSES = 10000
 IPV6_NETWORK_BITS = 64
+STRICT_IPV4_NETWORK_BITS = 24
+STRICT_IPV6_NETWORK_BITS = 48
 SESSION_PURPOSE = b"owner session\x00"
 DEVICE_PURPOSE = b"owner device\x00"
 DEVICE_KEY_SEPARATOR = b"\x00"
@@ -159,16 +161,17 @@ def is_default_allowed_host(name: str) -> bool:
     return name in own_host_names()
 
 
-def failure_bucket(address: str) -> str:
+def failure_bucket(address: str, strict: bool = False) -> str:
     try:
         parsed = ipaddress.ip_address(address)
     except ValueError:
         return address
+    if parsed.version == 6 and parsed.ipv4_mapped is not None:
+        parsed = parsed.ipv4_mapped
     if parsed.version == 4:
-        return str(parsed)
-    if parsed.ipv4_mapped is not None:
-        return str(parsed.ipv4_mapped)
-    return str(ipaddress.IPv6Network((int(parsed), IPV6_NETWORK_BITS), strict=False))
+        return str(ipaddress.IPv4Network((int(parsed), STRICT_IPV4_NETWORK_BITS), strict=False)) if strict else str(parsed)
+    bits = STRICT_IPV6_NETWORK_BITS if strict else IPV6_NETWORK_BITS
+    return str(ipaddress.IPv6Network((int(parsed), bits), strict=False))
 
 
 def _write_private_file(path: Path, record: dict) -> Path:
@@ -262,6 +265,14 @@ class FailureLimiter:
     def _is_strict(self) -> bool:
         return self.before_strict is not None and len(self._everyone) >= self.before_strict
 
+    def _buckets(self, key: str) -> tuple[str, ...]:
+        if self._is_strict():
+            return failure_bucket(key), failure_bucket(key, strict=True)
+        return (failure_bucket(key),)
+
+    def _wait_for(self, buckets, now: float) -> int:
+        return max(self._seconds_left(self._failures.get(bucket), now) for bucket in buckets)
+
     def _seconds_left(self, moments, now: float) -> int:
         limit = STRICT_FAILURES_PER_ADDRESS if self._is_strict() else self.per_address
         if not moments or len(moments) < limit:
@@ -281,29 +292,33 @@ class FailureLimiter:
         with self._lock:
             now = self.clock()
             self._forget_old(now)
-            return self._seconds_left(self._failures.get(key), now)
+            return self._wait_for(self._buckets(key), now)
 
     def take_turn(self, key: str) -> int:
         with self._lock:
             now = self.clock()
             self._forget_old(now)
-            moments = self._failures.get(key)
-            wait = self._seconds_left(moments, now) if moments else self._make_room(now)
+            buckets = self._buckets(key)
+            counted = buckets[-1]
+            wait = self._wait_for(buckets, now)
+            if not wait and counted not in self._failures:
+                wait = self._make_room(now)
             if wait:
                 return wait
-            moments = moments if moments is not None else collections.deque()
+            moments = self._failures.setdefault(counted, collections.deque())
             moments.append(now)
-            self._failures[key] = moments
-            self._failures.move_to_end(key)
+            self._failures.move_to_end(counted)
             if self.before_strict is not None:
                 self._everyone.append(now)
             return 0
 
     def succeeded(self, key: str) -> None:
         with self._lock:
-            moments = self._failures.pop(key, None)
-            if moments and self.before_strict is not None and moments[-1] in self._everyone:
-                self._everyone.remove(moments[-1])
+            buckets = {failure_bucket(key), failure_bucket(key, strict=True)}
+            cleared = [self._failures.pop(bucket) for bucket in buckets if bucket in self._failures]
+            latest = max((moments[-1] for moments in cleared if moments), default=None)
+            if latest is not None and self.before_strict is not None and latest in self._everyone:
+                self._everyone.remove(latest)
 
 
 def _encode(data: dict) -> str:
@@ -443,7 +458,7 @@ class PasswordAuth:
         device_id = self.device_for_token(device_token)
         if device_id is not None:
             return self.device_limiter, device_id
-        return self.limiter, failure_bucket(address)
+        return self.limiter, address
 
     def sign_in(self, user, password, address: str, device_token=None) -> str:
         if not isinstance(user, str) or not isinstance(password, str) or len(user) > MAX_FIELD_LENGTH or len(password) > MAX_PASSWORD_LENGTH:
@@ -461,12 +476,11 @@ class PasswordAuth:
         expected = self.setup_code() if self.needs_setup() else None
         if expected is None:
             raise SignInError("setup is already finished", status=403)
-        key = failure_bucket(address)
-        self._take_turn(self.limiter, key)
+        self._take_turn(self.limiter, address)
         if not isinstance(code, str) or not hmac.compare_digest(code.strip().encode(), expected.encode()):
             log.warning("wrong setup code from %s", address)
             raise SignInError("that setup code is wrong; the app writes it to its log when it starts", status=401)
-        self.limiter.succeeded(key)
+        self.limiter.succeeded(address)
         record = self.owner.create(clean_user_name(user), check_new_password(password, confirm))
         self._spend_setup_code(expected)
         log.info("owner account %r made from %s", record["user"], address)

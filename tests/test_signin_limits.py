@@ -110,6 +110,59 @@ def test_ipv6_addresses_are_counted_by_their_64_network(address, bucket):
     assert signin.failure_bucket(address) == bucket
 
 
+@pytest.mark.parametrize("address, bucket", [
+    ("203.0.113.9", "203.0.113.0/24"),
+    ("::ffff:203.0.113.9", "203.0.113.0/24"),
+    ("2001:db8:1:2::1", "2001:db8:1::/48"),
+    ("2001:db8:1:ffff:aaaa:bbbb:cccc:dddd", "2001:db8:1::/48"),
+    ("not an address", "not an address"),
+])
+def test_strict_mode_counts_whole_networks(address, bucket):
+    assert signin.failure_bucket(address, strict=True) == bucket
+
+
+def test_once_strict_one_network_shares_one_try(clock):
+    limiter = FailureLimiter(clock=clock, before_strict=2)
+    assert limiter.take_turn("198.51.100.1") == 0
+    assert limiter.take_turn("198.51.100.2") == 0
+    assert limiter.take_turn("203.0.113.5") == 0
+    assert limiter.take_turn("203.0.113.6") > 0
+    assert limiter.take_turn("203.0.114.1") == 0
+    assert limiter.take_turn("2001:db8:1:2::1") == 0
+    assert limiter.take_turn("2001:db8:1:3::1") > 0
+    assert limiter.take_turn("2001:db8:2::1") == 0
+
+
+def test_once_strict_an_address_blocked_before_stays_blocked(clock):
+    limiter = FailureLimiter(clock=clock, before_strict=6)
+    for _attempt in range(5):
+        assert limiter.take_turn(ATTACKER) == 0
+    assert limiter.take_turn("198.51.100.1") == 0
+    assert limiter.take_turn(ATTACKER) > 0
+    assert limiter.seconds_blocked(ATTACKER) > 0
+
+
+def test_a_table_filled_from_one_network_does_not_keep_new_browsers_out(tmp_path, clock):
+    limiter = FailureLimiter(clock=clock, before_strict=2, max_tracked=10)
+    auth = new_auth(tmp_path, clock, limiter=limiter)
+    set_up(auth)
+    for host in range(1, 3):
+        assert wrong_sign_in(auth, f"198.51.100.{host}") == 401
+    for network in range(1000):
+        wrong_sign_in(auth, f"2001:db8:1:{network:x}::1")
+    assert auth.sign_in(OWNER_NAME, PASSWORD, "192.0.2.77")
+    assert auth.sign_in(OWNER_NAME, PASSWORD, "2001:db8:77::1")
+
+
+def test_a_right_password_in_strict_mode_clears_its_network(clock):
+    limiter = FailureLimiter(clock=clock, before_strict=2)
+    assert limiter.take_turn("198.51.100.1") == 0
+    assert limiter.take_turn("198.51.100.2") == 0
+    assert limiter.take_turn("203.0.113.5") == 0
+    limiter.succeeded("203.0.113.5")
+    assert limiter.seconds_blocked("203.0.113.6") == 0
+
+
 def test_addresses_in_one_ipv6_network_share_one_allowance(auth):
     set_up(auth)
     for host in range(1, 6):
