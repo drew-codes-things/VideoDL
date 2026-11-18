@@ -11,7 +11,7 @@ os.environ.setdefault("VIDEODL_DB_PATH", os.path.join(TEST_STATE_DIR, "videodl.d
 
 PUBLIC_ADDRESS = "93.184.215.14"
 FAKE_DNS = {
-    "nas.lan": ["192.168.1.5"],
+    "nas.lan": ["10.1.2.5"],
     "localhost": ["127.0.0.1"],
     "rebind.example": [PUBLIC_ADDRESS, "10.0.0.7"],
     "metadata.example": ["169.254.169.254"],

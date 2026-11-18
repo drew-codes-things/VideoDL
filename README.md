@@ -185,4 +185,4 @@ The tests fake yt-dlp and DNS, so they download nothing and need no network.
 
 ## License
 
-MIT - made by Drew
+MIT, see [LICENSE](LICENSE).

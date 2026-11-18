@@ -96,7 +96,7 @@ def test_anything_but_an_http_or_https_link_is_refused(client, url):
     "http://127.0.0.1:5002/status",
     "http://localhost/",
     "http://[::1]/",
-    "http://192.168.1.10:5003/",
+    "http://192.0.2.10:8080/",
     "http://nas.lan/video.mp4",
     "http://rebind.example/",
     "http://metadata.example/latest",
@@ -129,7 +129,7 @@ def run_job(downloads, url, factory):
 
 def test_a_private_link_already_in_the_queue_is_refused_by_the_worker(downloads):
     factory = fake_factory({"id": "v1", "title": "clip", "duration": 10})
-    job = run_job(downloads, "http://192.168.1.10:5003/", factory)
+    job = run_job(downloads, "http://192.0.2.10:8080/", factory)
     assert job["status"] == "error"
     assert "private" in job["error"]
     assert factory.downloads_started == 0
@@ -137,7 +137,7 @@ def test_a_private_link_already_in_the_queue_is_refused_by_the_worker(downloads)
 
 def test_a_public_page_whose_video_is_on_a_private_address_is_refused(downloads):
     info = {"id": "v1", "title": "clip", "duration": 10,
-            "requested_formats": [{"url": "http://192.168.1.5/secret.mp4"}, {"url": "https://cdn.example/a.m4a"}]}
+            "requested_formats": [{"url": "http://10.1.2.5/secret.mp4"}, {"url": "https://cdn.example/a.m4a"}]}
     factory = fake_factory(info)
     job = run_job(downloads, "https://example.com/page", factory)
     assert job["status"] == "error"
