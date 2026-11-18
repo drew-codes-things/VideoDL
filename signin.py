@@ -270,7 +270,7 @@ class PasswordAuth:
         return f"{payload}.{self._signature(payload)}"
 
     def user_for_token(self, token) -> str | None:
-        if not isinstance(token, str) or token.count(".") != 1:
+        if not isinstance(token, str) or not token.isascii() or token.count(".") != 1:
             return None
         payload, signature = token.split(".")
         if not hmac.compare_digest(self._signature(payload), signature):

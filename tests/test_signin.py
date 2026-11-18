@@ -110,6 +110,11 @@ def test_signing_out_and_expiry_end_the_session(web, clock):
     assert web.get("/status").status_code == 401
 
 
+@pytest.mark.parametrize("token", ["\u00e9.\u00e9", "abc.\udcff", "no-dot", "", None])
+def test_an_odd_session_value_is_refused_not_crashed(web, token):
+    assert app.OWN_SIGN_IN.user_for_token(token) is None
+
+
 def test_the_session_cookie_flags(web):
     local = set_up_owner(web)
     assert "HttpOnly" in session_cookie(local) and "SameSite=Lax" in session_cookie(local)
