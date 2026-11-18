@@ -22,6 +22,7 @@ def downloads(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "_free_bytes", lambda folder: PLENTY_OF_SPACE)
     monkeypatch.setattr(app, "WEB_USERNAME", "")
     monkeypatch.setattr(app, "WEB_PASSWORD", "")
+    monkeypatch.setattr(app, "ALLOW_INSECURE", True)
     folder = tmp_path / "downloads"
     folder.mkdir()
     return folder
