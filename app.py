@@ -1,11 +1,13 @@
+import contextlib
+import ipaddress
 import os
 import secrets
-import sys
+import tempfile
 from datetime import datetime
 from functools import wraps
 
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, session
+from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, session
 from markupsafe import Markup
 
 import db
@@ -13,6 +15,7 @@ import links
 import worker
 import ytdlp_update
 from quality import QUALITY_TIERS, quality_choices, resolve_quality
+from signin import SIGN_IN_PATHS, OwnerAccount, PasswordAuth, add_sign_in_pages
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -26,6 +29,15 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", os.path.join(BASE_DIR, "downloads"))
 
 WEB_USERNAME = (os.getenv("WEB_USERNAME") or "").strip()
 WEB_PASSWORD = (os.getenv("WEB_PASSWORD") or "").strip()
+ALLOW_INSECURE = (os.getenv("ALLOW_INSECURE") or "false").strip().lower() == "true"
+SECURE_COOKIE_CHOICES = ("auto", "true", "false")
+OWN_SESSION_COOKIE = "videodl_session"
+OWNER_FILE_NAME = "owner.json"
+SECRET_FILE_NAME = "secret_key"
+SECRET_BYTES = 32
+MISDIRECTED_REQUEST = 421
+WRONG_HOST_TEXT = ("VideoDL does not answer on that host name: the own sign-in answers on the names in ALLOWED_HOSTS, "
+                   "or with it empty on localhost, IP addresses and this machine's name.")
 FINISHED_AT_FORMAT = "%a %d %b %Y, %H:%M"
 MAX_URLS_PER_SUBMIT = 50
 MAX_FORM_BYTES = 512 * 1024
@@ -36,6 +48,117 @@ def auth_enabled():
     return bool(WEB_USERNAME and WEB_PASSWORD)
 
 
+def sign_in_method():
+    if auth_enabled():
+        return "basic"
+    if ALLOW_INSECURE:
+        return "proxy"
+    return "builtin"
+
+
+def state_dir():
+    return os.path.dirname(os.path.abspath(db.DB_PATH))
+
+
+def read_secure_cookies():
+    choice = (os.getenv("SECURE_COOKIES") or "auto").strip().lower()
+    if choice not in SECURE_COOKIE_CHOICES:
+        raise SystemExit(f"SECURE_COOKIES must be one of {', '.join(SECURE_COOKIE_CHOICES)}, got {choice!r}")
+    return choice
+
+
+def read_list(name):
+    return tuple(part.strip() for part in (os.getenv(name) or "").split(",") if part.strip())
+
+
+def has_host_bits(entry):
+    try:
+        ipaddress.ip_network(entry, strict=True)
+    except ValueError:
+        return True
+    return False
+
+
+def read_trusted_proxies():
+    if sign_in_method() != "builtin":
+        return ()
+    entries = read_list("TRUSTED_PROXIES")
+    for entry in entries:
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError as error:
+            raise SystemExit(f"TRUSTED_PROXIES has {entry!r}, which is not an address or network") from error
+        if has_host_bits(entry):
+            raise SystemExit(f"TRUSTED_PROXIES has {entry!r}, which has host bits set; write {network} for the network "
+                             f"or {entry.split('/')[0]} for one address")
+        if network.num_addresses > 1 and not network.is_private:
+            raise SystemExit(f"TRUSTED_PROXIES has {entry!r}, which reaches public addresses; list the proxy's own address "
+                             "or a private network")
+    return entries
+
+
+def usable_secret(secret, source):
+    if len(secret) < SECRET_BYTES:
+        raise SystemExit(f"{source} holds {len(secret)} bytes, fewer than the {SECRET_BYTES} the sign-in key needs; "
+                         "set a longer SECRET_KEY, or stop VideoDL, delete the secret_key file and start it again")
+    return secret
+
+
+def save_secret_file_unless_present(path):
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".secret-", dir=folder)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(secrets.token_hex(SECRET_BYTES).encode())
+        with contextlib.suppress(FileExistsError):
+            os.link(temporary, path)
+    finally:
+        os.unlink(temporary)
+
+
+def load_or_create_secret_file(path):
+    if not os.path.exists(path):
+        save_secret_file_unless_present(path)
+    with open(path, "rb") as handle:
+        return usable_secret(handle.read(), path)
+
+
+def sign_in_secret():
+    if sign_in_method() != "builtin":
+        return secrets.token_hex(SECRET_BYTES).encode()
+    configured = (os.getenv("SECRET_KEY") or "").strip()
+    if configured:
+        return usable_secret(configured.encode(), "SECRET_KEY")
+    return load_or_create_secret_file(os.path.join(state_dir(), SECRET_FILE_NAME))
+
+
+OWN_SIGN_IN = PasswordAuth(OwnerAccount(os.path.join(state_dir(), OWNER_FILE_NAME)), sign_in_secret(),
+                           OWN_SESSION_COOKIE, read_secure_cookies(), read_list("ALLOWED_HOSTS"),
+                           trusted_proxies=read_trusted_proxies())
+add_sign_in_pages(app, OWN_SIGN_IN, "VideoDL")
+
+
+@app.before_request
+def hide_sign_in_pages_unless_used():
+    if request.path in SIGN_IN_PATHS and sign_in_method() != "builtin":
+        abort(404)
+    return None
+
+
+@app.before_request
+def refuse_foreign_host_names():
+    if sign_in_method() == "builtin" and not OWN_SIGN_IN.accepts_host(request.host):
+        return Response(WRONG_HOST_TEXT, status=MISDIRECTED_REQUEST, mimetype="text/plain")
+    return None
+
+
+def refuse_signed_out_visitor():
+    if request.method == "GET" and request.path == "/":
+        return redirect(OWN_SIGN_IN.entry_path(), code=303)
+    return Response("Sign in first.", status=401, mimetype="text/plain")
+
+
 def matches_secret(submitted, expected):
     return secrets.compare_digest(submitted.encode("utf-8"), expected.encode("utf-8"))
 
@@ -43,7 +166,12 @@ def matches_secret(submitted, expected):
 def requires_auth(view_func):
     @wraps(view_func)
     def wrapped(*args, **kwargs):
-        if not auth_enabled():
+        method = sign_in_method()
+        if method == "proxy":
+            return view_func(*args, **kwargs)
+        if method == "builtin":
+            if OWN_SIGN_IN.user_for(request.remote_addr or "", request.headers) is None:
+                return refuse_signed_out_visitor()
             return view_func(*args, **kwargs)
         auth = request.authorization
         if auth and matches_secret(auth.username or "", WEB_USERNAME) and matches_secret(auth.password or "", WEB_PASSWORD):
@@ -545,21 +673,14 @@ if __name__ == "__main__":
 
     bind_host = os.getenv("BIND_HOST", "127.0.0.1")
     bind_port = int(os.getenv("PORT", "5002"))
-    loopback = bind_host in ("127.0.0.1", "localhost", "::1")
-    allow_insecure = os.getenv("ALLOW_INSECURE", "false").lower() == "true"
-
-    if not loopback and not auth_enabled() and not allow_insecure:
-        print(
-            f"ERROR: refusing to bind to {bind_host} without auth.\n"
-            "  Set WEB_USERNAME and WEB_PASSWORD in .env, bind to 127.0.0.1,\n"
-            "  or set ALLOW_INSECURE=true if a reverse proxy handles auth."
-        )
-        sys.exit(1)
+    method = sign_in_method()
 
     worker.start_worker(DOWNLOAD_DIR)
 
     print("VideoDL")
     print(f"   -> Web UI: http://{bind_host}:{bind_port}")
-    if not auth_enabled():
-        print("WARNING: WEB_USERNAME/WEB_PASSWORD not set; web auth is disabled (loopback only).")
+    if method == "proxy":
+        print("ALLOW_INSECURE=true: VideoDL has no sign-in of its own; the proxy in front must sign people in.")
+    if method == "builtin" and OWN_SIGN_IN.needs_setup():
+        OWN_SIGN_IN.setup_code()
     app.run(host=bind_host, port=bind_port, debug=False)

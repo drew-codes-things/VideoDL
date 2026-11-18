@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import app
 import db
 
-USERNAME = "drew"
+USERNAME = "owner"
 PASSWORD_WITH_POUND_SIGN = "p£ssword"
 
 
