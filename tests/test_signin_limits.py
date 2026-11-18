@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import socket
@@ -122,16 +123,61 @@ def test_strict_mode_counts_whole_networks(address, bucket):
     assert signin.failure_bucket(address, strict=True) == bucket
 
 
-def test_once_strict_one_network_shares_one_try(clock):
+def test_once_strict_each_address_gets_one_try_and_each_network_three(clock):
     limiter = FailureLimiter(clock=clock, before_strict=2)
     assert limiter.take_turn("198.51.100.1") == 0
     assert limiter.take_turn("198.51.100.2") == 0
     assert limiter.take_turn("203.0.113.5") == 0
-    assert limiter.take_turn("203.0.113.6") > 0
+    assert limiter.take_turn("203.0.113.5") > 0
+    assert limiter.take_turn("203.0.113.6") == 0
+    assert limiter.take_turn("203.0.113.7") == 0
+    assert limiter.take_turn("203.0.113.8") > 0
     assert limiter.take_turn("203.0.114.1") == 0
     assert limiter.take_turn("2001:db8:1:2::1") == 0
-    assert limiter.take_turn("2001:db8:1:3::1") > 0
+    assert limiter.take_turn("2001:db8:1:2::ffff") > 0
+    assert limiter.take_turn("2001:db8:1:3::1") == 0
+    assert limiter.take_turn("2001:db8:1:4::1") == 0
+    assert limiter.take_turn("2001:db8:1:5::1") > 0
     assert limiter.take_turn("2001:db8:2::1") == 0
+
+
+def test_once_strict_a_neighbour_s_wrong_password_leaves_the_owner_a_new_browser(tmp_path, clock):
+    auth = new_auth(tmp_path, clock, limiter=FailureLimiter(clock=clock, before_strict=4))
+    set_up(auth)
+    for host in range(1, 5):
+        assert wrong_sign_in(auth, f"203.0.113.{host}") == 401
+    assert wrong_sign_in(auth, "192.0.2.1") == 401
+    assert auth.sign_in(OWNER_NAME, PASSWORD, "192.0.2.99")
+    assert wrong_sign_in(auth, "2001:db8:bb:1::1") == 401
+    assert auth.sign_in(OWNER_NAME, PASSWORD, "2001:db8:bb:ffff::9")
+
+
+def address_in_one_ipv6_56(index: int) -> str:
+    return str(ipaddress.ip_address(int(ipaddress.ip_address("2001:db8:5:100::")) + ((index % 256) << 64) + 1))
+
+
+@pytest.mark.parametrize("neighbour, owner", [
+    ("198.51.100.200", "198.51.100.7"),
+    ("2001:db8:9:1::1", "2001:db8:9:ffff::7"),
+])
+def test_a_neighbour_trying_whenever_allowed_for_two_hours_never_keeps_the_owner_out(clock, neighbour, owner):
+    limiter = FailureLimiter(clock=clock)
+    attempts = neighbour_checked = owner_checks = owner_refused = 0
+    for second in range(2 * 3600):
+        clock.now += 1
+        for _ in range(4):
+            limiter.take_turn(address_in_one_ipv6_56(attempts))
+            attempts += 1
+        if second < 60:
+            continue
+        if limiter.take_turn(neighbour) == 0:
+            neighbour_checked += 1
+        if second % 60 == 59:
+            owner_checks += 1
+            owner_refused += limiter.seconds_blocked(owner) > 0
+            assert len(limiter._everyone) >= signin.FAILURES_BEFORE_STRICT
+    assert neighbour_checked == 8
+    assert (owner_checks, owner_refused) == (119, 0)
 
 
 def test_once_strict_an_address_blocked_before_stays_blocked(clock):
