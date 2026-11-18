@@ -70,8 +70,10 @@ How it is protected:
   minutes each address gets one try and each network three (IPv4 by `/24`,
   IPv6 by `/48`). A right password from a locked address is refused too.
 - During such an attack one wrong password from a neighbour on the same
-  provider network does not keep your new browser out: that takes three,
-  from three of their addresses, within 15 minutes.
+  provider network does not keep your new browser out: that takes three
+  wrong passwords within 15 minutes from three of their addresses (IPv4)
+  or three of their home lines (IPv6, where a line's whole `/56` counts as
+  one address).
 - A browser that has signed in before keeps a signed device cookie and has
   its own 5 tries, so a stranger who locks out your address (or the
   address of the proxy in front) cannot lock you out of that browser.

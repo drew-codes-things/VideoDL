@@ -133,12 +133,35 @@ def test_once_strict_each_address_gets_one_try_and_each_network_three(clock):
     assert limiter.take_turn("203.0.113.7") == 0
     assert limiter.take_turn("203.0.113.8") > 0
     assert limiter.take_turn("203.0.114.1") == 0
-    assert limiter.take_turn("2001:db8:1:2::1") == 0
-    assert limiter.take_turn("2001:db8:1:2::ffff") > 0
-    assert limiter.take_turn("2001:db8:1:3::1") == 0
-    assert limiter.take_turn("2001:db8:1:4::1") == 0
-    assert limiter.take_turn("2001:db8:1:5::1") > 0
+    assert limiter.take_turn("2001:db8:1:100::1") == 0
+    assert limiter.take_turn("2001:db8:1:100::ffff") > 0
+    assert limiter.take_turn("2001:db8:1:1ff::1") > 0
+    assert limiter.take_turn("2001:db8:1:200::1") == 0
+    assert limiter.take_turn("2001:db8:1:300::1") == 0
+    assert limiter.take_turn("2001:db8:1:400::1") > 0
     assert limiter.take_turn("2001:db8:2::1") == 0
+
+
+@pytest.mark.parametrize("address, source", [
+    ("203.0.113.9", "203.0.113.9"),
+    ("::ffff:203.0.113.9", "203.0.113.9"),
+    ("2001:db8:1:2::1", "2001:db8:1::/56"),
+    ("2001:db8:1:ff:aaaa:bbbb:cccc:dddd", "2001:db8:1::/56"),
+    ("2001:db8:1:100::1", "2001:db8:1:100::/56"),
+    ("not an address", "not an address"),
+])
+def test_strict_mode_counts_one_ipv6_home_line_as_one_address(address, source):
+    assert signin.failure_source(address) == source
+
+
+def test_once_strict_three_networks_of_one_ipv6_home_line_leave_the_owner_a_new_browser(tmp_path, clock):
+    auth = new_auth(tmp_path, clock, limiter=FailureLimiter(clock=clock, before_strict=4))
+    set_up(auth)
+    for host in range(1, 5):
+        assert wrong_sign_in(auth, f"203.0.113.{host}") == 401
+    neighbour_line = [wrong_sign_in(auth, f"2001:db8:bb:{subnet}::1") for subnet in (1, 2, 3)]
+    assert neighbour_line == [401, 429, 429]
+    assert auth.sign_in(OWNER_NAME, PASSWORD, "2001:db8:bb:ffff::9")
 
 
 def test_once_strict_a_neighbour_s_wrong_password_leaves_the_owner_a_new_browser(tmp_path, clock):
@@ -201,13 +224,26 @@ def test_a_table_filled_from_one_network_does_not_keep_new_browsers_out(tmp_path
     assert auth.sign_in(OWNER_NAME, PASSWORD, "2001:db8:77::1")
 
 
-def test_a_right_password_in_strict_mode_clears_its_network(clock):
+def test_a_right_password_in_strict_mode_gives_back_its_own_turn(clock):
     limiter = FailureLimiter(clock=clock, before_strict=2)
     assert limiter.take_turn("198.51.100.1") == 0
     assert limiter.take_turn("198.51.100.2") == 0
     assert limiter.take_turn("203.0.113.5") == 0
     limiter.succeeded("203.0.113.5")
     assert limiter.seconds_blocked("203.0.113.6") == 0
+
+
+def test_a_right_password_in_strict_mode_leaves_the_other_addresses_failures_counted(clock):
+    limiter = FailureLimiter(clock=clock, before_strict=2)
+    assert limiter.take_turn("198.51.100.1") == 0
+    assert limiter.take_turn("198.51.100.2") == 0
+    assert limiter.take_turn("203.0.113.1") == 0
+    assert limiter.take_turn("203.0.113.2") == 0
+    assert limiter.take_turn("203.0.113.200") == 0
+    limiter.succeeded("203.0.113.200")
+    assert limiter.take_turn("203.0.113.3") == 0
+    assert limiter.take_turn("203.0.113.4") > 0
+    assert limiter.seconds_blocked("203.0.113.200") > 0
 
 
 def test_addresses_in_one_ipv6_network_share_one_allowance(auth):
