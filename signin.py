@@ -37,6 +37,8 @@ SCRYPT_LENGTH = 32
 SALT_BYTES = 16
 GENERATION_BYTES = 16
 DEVICE_ID_BYTES = 16
+DEVICE_KEY_BYTES = 16
+DEVICE_KEY_FIELD = "device_key"
 SETUP_CODE_BYTES = 9
 FAILURES_PER_ADDRESS = 5
 FAILURES_PER_DEVICE = 5
@@ -47,6 +49,7 @@ MAX_TRACKED_ADDRESSES = 10000
 IPV6_NETWORK_BITS = 64
 SESSION_PURPOSE = b"owner session\x00"
 DEVICE_PURPOSE = b"owner device\x00"
+DEVICE_KEY_SEPARATOR = b"\x00"
 DEVICE_COOKIE_SUFFIX = "_device"
 FORWARDED_FOR_HEADER = "X-Forwarded-For"
 LOOPBACK_HOST_NAMES = ("localhost", "127.0.0.1", "::1")
@@ -198,10 +201,13 @@ class OwnerAccount:
                                  "to make the owner account again") from error
         if not isinstance(record, dict) or not all(isinstance(record.get(key), str) for key in ("user", "password", "generation")):
             raise OwnerFileError(f"{self.path} is missing the user, password or generation field")
+        if not isinstance(record.get(DEVICE_KEY_FIELD, ""), str):
+            raise OwnerFileError(f"{self.path} has a {DEVICE_KEY_FIELD} field that is not text")
         return record
 
     def create(self, user: str, password: str) -> dict:
-        record = {"user": user, "password": hash_password(password), "generation": secrets.token_hex(GENERATION_BYTES)}
+        record = {"user": user, "password": hash_password(password), "generation": secrets.token_hex(GENERATION_BYTES),
+                  DEVICE_KEY_FIELD: secrets.token_hex(DEVICE_KEY_BYTES)}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = _write_private_file(self.path, record)
         try:
@@ -402,18 +408,29 @@ class PasswordAuth:
     def user_for(self, remote_address: str, headers) -> str | None:
         return self.user_for_token(parse_cookie(headers.get("Cookie") or "").get(self.cookie_name))
 
-    def _device_signature(self, device_id: str) -> str:
-        return hmac.new(self.secret, DEVICE_PURPOSE + device_id.encode(), hashlib.sha256).hexdigest()
+    def _owner_device_key(self) -> str | None:
+        record = self.owner.read()
+        return None if record is None else record.get(DEVICE_KEY_FIELD, "")
 
-    def new_device_token(self) -> str:
+    def _device_signature(self, device_id: str, owner_device_key: str) -> str:
+        message = DEVICE_PURPOSE + owner_device_key.encode() + DEVICE_KEY_SEPARATOR + device_id.encode()
+        return hmac.new(self.secret, message, hashlib.sha256).hexdigest()
+
+    def new_device_token(self) -> str | None:
+        owner_device_key = self._owner_device_key()
+        if owner_device_key is None:
+            return None
         device_id = secrets.token_urlsafe(DEVICE_ID_BYTES)
-        return f"{device_id}.{self._device_signature(device_id)}"
+        return f"{device_id}.{self._device_signature(device_id, owner_device_key)}"
 
     def device_for_token(self, token) -> str | None:
         if not isinstance(token, str) or not token.isascii() or token.count(".") != 1:
             return None
         device_id, signature = token.split(".")
-        if not device_id or not hmac.compare_digest(self._device_signature(device_id), signature):
+        owner_device_key = self._owner_device_key()
+        if not device_id or owner_device_key is None:
+            return None
+        if not hmac.compare_digest(self._device_signature(device_id, owner_device_key), signature):
             return None
         return device_id
 
@@ -522,8 +539,10 @@ def add_sign_in_pages(app: Flask, auth: PasswordAuth, app_name: str) -> None:
         response = redirect(f"{SIGN_IN_PATH}?{SIGNED_IN_CHECK}=1", code=303)
         response.set_cookie(auth.cookie_name, token, max_age=SESSION_SECONDS, path="/", httponly=True, samesite="Lax",
                             secure=is_secure)
-        if auth.device_for_token(request.cookies.get(auth.device_cookie_name)) is None:
-            response.set_cookie(auth.device_cookie_name, auth.new_device_token(), max_age=DEVICE_SECONDS, path=SIGN_IN_PATH,
+        has_device = auth.device_for_token(request.cookies.get(auth.device_cookie_name)) is not None
+        device_token = None if has_device else auth.new_device_token()
+        if device_token is not None:
+            response.set_cookie(auth.device_cookie_name, device_token, max_age=DEVICE_SECONDS, path=SIGN_IN_PATH,
                                 httponly=True, samesite="Lax", secure=is_secure)
         return response
 

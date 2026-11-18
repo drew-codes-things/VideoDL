@@ -72,6 +72,7 @@ How it is protected:
 - A browser that has signed in before keeps a signed device cookie and has
   its own 5 tries, so a stranger who locks out your address (or the
   address of the proxy in front) cannot lock you out of that browser.
+  Making a new owner account ends every device cookie of the old one.
 - The session cookie is `HttpOnly`, `SameSite=Lax` and signed with the app's
   secret key (`SECRET_KEY`, or `secret_key` next to `videodl.db`, made on
   first start, mode 600). It is `Secure` everywhere except plain `http` on

@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import hmac
+import json
 import logging
 import socket
 import threading
@@ -13,7 +15,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import signin
-from signin import FailureLimiter, OwnerAccount, PasswordAuth, SignInError, check_new_password
+from signin import FailureLimiter, OwnerAccount, OwnerFileError, PasswordAuth, SignInError, check_new_password
 
 SECRET = b"k" * 32
 OTHER_SECRET = b"o" * 32
@@ -228,9 +230,72 @@ def test_a_forged_device_cookie_counts_as_the_address(tmp_path, clock, token):
     assert status_of(lambda: auth.sign_in(OWNER_NAME, PASSWORD, ATTACKER, token)) == 429
 
 
+def test_device_cookies_end_when_the_owner_account_is_made_again(tmp_path, clock):
+    auth = new_auth(tmp_path, clock)
+    set_up(auth)
+    old_device = auth.new_device_token()
+    auth.owner.path.unlink()
+    set_up(auth)
+    assert auth.device_for_token(old_device) is None
+    for _attempt in range(5):
+        wrong_sign_in(auth, ATTACKER)
+    assert status_of(lambda: auth.sign_in(OWNER_NAME, PASSWORD, ATTACKER, old_device)) == 429
+    assert auth.sign_in(OWNER_NAME, PASSWORD, ATTACKER, auth.new_device_token())
+
+
+def test_every_owner_account_gets_its_own_device_key(tmp_path):
+    first = OwnerAccount(tmp_path / "first.json").create(OWNER_NAME, PASSWORD)
+    second = OwnerAccount(tmp_path / "second.json").create(OWNER_NAME, PASSWORD)
+    assert len(first["device_key"]) == 32
+    assert first["device_key"] != second["device_key"]
+
+
+def signed(purpose: bytes, message: bytes) -> str:
+    return hmac.new(SECRET, purpose + message, hashlib.sha256).hexdigest()
+
+
+def test_the_device_signature_covers_the_owner_key_under_its_own_purpose(tmp_path, clock):
+    auth = new_auth(tmp_path, clock)
+    set_up(auth)
+    message = auth.owner.read()["device_key"].encode() + b"\x00" + b"phone"
+    assert auth.device_for_token("phone." + signed(b"owner device\x00", message)) == "phone"
+    assert auth.device_for_token("phone." + signed(b"owner session\x00", message)) is None
+    assert auth.device_for_token("phone." + signed(b"owner device\x00", b"\x00phone")) is None
+
+
+def test_there_are_no_device_cookies_before_the_owner_exists(auth):
+    assert auth.new_device_token() is None
+    set_up(auth)
+    device = auth.new_device_token()
+    auth.owner.path.unlink()
+    assert auth.device_for_token(device) is None
+
+
+def test_an_owner_file_from_before_device_keys_still_works(tmp_path, clock):
+    auth = new_auth(tmp_path, clock)
+    set_up(auth)
+    record = auth.owner.read()
+    del record["device_key"]
+    auth.owner.path.write_text(json.dumps(record))
+    device = auth.new_device_token()
+    assert auth.device_for_token(device) is not None
+    assert auth.sign_in(OWNER_NAME, PASSWORD, OWNER_ADDRESS, device)
+
+
+def test_an_owner_file_with_an_odd_device_key_is_reported(tmp_path, clock):
+    auth = new_auth(tmp_path, clock)
+    set_up(auth)
+    auth.owner.path.write_text(json.dumps(dict(auth.owner.read(), device_key=7)))
+    with pytest.raises(OwnerFileError, match="device_key"):
+        auth.owner.read()
+
+
 def test_a_device_cookie_from_another_key_is_not_believed(tmp_path, clock):
-    other = PasswordAuth(OwnerAccount(tmp_path / "other.json"), OTHER_SECRET, COOKIE)
-    assert new_auth(tmp_path, clock).device_for_token(other.new_device_token()) is None
+    auth = new_auth(tmp_path, clock)
+    set_up(auth)
+    other = PasswordAuth(auth.owner, OTHER_SECRET, COOKIE)
+    assert other.device_for_token(other.new_device_token()) is not None
+    assert auth.device_for_token(other.new_device_token()) is None
 
 
 def test_the_setup_code_works_only_once(auth, caplog):
