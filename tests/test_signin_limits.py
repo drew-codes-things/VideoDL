@@ -11,6 +11,7 @@ import os
 import sys
 
 import pytest
+from flask import Flask
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -242,7 +243,8 @@ def test_the_own_sign_in_answers_on_this_machine_s_name_by_default(auth):
     assert auth.accepts_host(socket.gethostname() + ":8097")
 
 
-@pytest.mark.parametrize("host", ["rebind.evil.example:8097", "localhost.evil.example", "", "127.0.0.1:8097@evil.example"])
+@pytest.mark.parametrize("host", ["rebind.evil.example:8097", "localhost.evil.example", "", "127.0.0.1:8097@evil.example",
+                                  "xlocalhost:8097", "evillocalhost"])
 def test_the_own_sign_in_refuses_other_names_by_default(auth, host):
     assert not auth.accepts_host(host)
 
@@ -281,6 +283,15 @@ def test_a_forged_device_cookie_counts_as_the_address(tmp_path, clock, token):
     for _attempt in range(5):
         wrong_sign_in(auth, ATTACKER, token)
     assert status_of(lambda: auth.sign_in(OWNER_NAME, PASSWORD, ATTACKER, token)) == 429
+
+
+def test_a_device_cookie_has_five_tries_of_its_own_by_default(tmp_path):
+    auth = PasswordAuth(OwnerAccount(tmp_path / "owner.json"), SECRET, COOKIE)
+    set_up(auth)
+    device = auth.new_device_token()
+    for _attempt in range(5):
+        assert wrong_sign_in(auth, OWNER_ADDRESS, device) == 401
+    assert wrong_sign_in(auth, OWNER_ADDRESS, device) == 429
 
 
 def test_device_cookies_end_when_the_owner_account_is_made_again(tmp_path, clock):
@@ -341,6 +352,20 @@ def test_an_owner_file_with_an_odd_device_key_is_reported(tmp_path, clock):
     auth.owner.path.write_text(json.dumps(dict(auth.owner.read(), device_key=7)))
     with pytest.raises(OwnerFileError, match="device_key"):
         auth.owner.read()
+
+
+def test_a_browser_with_a_device_cookie_is_not_given_another(tmp_path, clock):
+    auth = new_auth(tmp_path, clock)
+    app = Flask(__name__)
+    signin.add_sign_in_pages(app, auth, "Test")
+    browser = app.test_client()
+    made = browser.post("/setup", data={"code": auth.setup_code(), "user": OWNER_NAME, "password": PASSWORD, "confirm": PASSWORD})
+    assert any(value.startswith(COOKIE + "_device=") for value in made.headers.getlist("Set-Cookie"))
+    again = browser.post("/signin", data={"user": OWNER_NAME, "password": PASSWORD})
+    assert again.status_code == 303
+    cookies = again.headers.getlist("Set-Cookie")
+    assert any(value.startswith(COOKIE + "=") for value in cookies)
+    assert not any(value.startswith(COOKIE + "_device=") for value in cookies)
 
 
 def test_a_device_cookie_from_another_key_is_not_believed(tmp_path, clock):
