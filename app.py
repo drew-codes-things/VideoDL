@@ -1,4 +1,5 @@
 import contextlib
+import ipaddress
 import os
 import secrets
 import tempfile
@@ -34,6 +35,9 @@ OWN_SESSION_COOKIE = "videodl_session"
 OWNER_FILE_NAME = "owner.json"
 SECRET_FILE_NAME = "secret_key"
 SECRET_BYTES = 32
+MISDIRECTED_REQUEST = 421
+WRONG_HOST_TEXT = ("VideoDL does not answer on that host name: the own sign-in answers on the names in ALLOWED_HOSTS, "
+                   "or with it empty on localhost, IP addresses and this machine's name.")
 FINISHED_AT_FORMAT = "%a %d %b %Y, %H:%M"
 MAX_URLS_PER_SUBMIT = 50
 MAX_FORM_BYTES = 512 * 1024
@@ -61,6 +65,36 @@ def read_secure_cookies():
     if choice not in SECURE_COOKIE_CHOICES:
         raise SystemExit(f"SECURE_COOKIES must be one of {', '.join(SECURE_COOKIE_CHOICES)}, got {choice!r}")
     return choice
+
+
+def read_list(name):
+    return tuple(part.strip() for part in (os.getenv(name) or "").split(",") if part.strip())
+
+
+def has_host_bits(entry):
+    try:
+        ipaddress.ip_network(entry, strict=True)
+    except ValueError:
+        return True
+    return False
+
+
+def read_trusted_proxies():
+    if sign_in_method() != "builtin":
+        return ()
+    entries = read_list("TRUSTED_PROXIES")
+    for entry in entries:
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError as error:
+            raise SystemExit(f"TRUSTED_PROXIES has {entry!r}, which is not an address or network") from error
+        if has_host_bits(entry):
+            raise SystemExit(f"TRUSTED_PROXIES has {entry!r}, which has host bits set; write {network} for the network "
+                             f"or {entry.split('/')[0]} for one address")
+        if network.num_addresses > 1 and not network.is_private:
+            raise SystemExit(f"TRUSTED_PROXIES has {entry!r}, which reaches public addresses; list the proxy's own address "
+                             "or a private network")
+    return entries
 
 
 def usable_secret(secret, source):
@@ -100,7 +134,8 @@ def sign_in_secret():
 
 
 OWN_SIGN_IN = PasswordAuth(OwnerAccount(os.path.join(state_dir(), OWNER_FILE_NAME)), sign_in_secret(),
-                           OWN_SESSION_COOKIE, read_secure_cookies())
+                           OWN_SESSION_COOKIE, read_secure_cookies(), read_list("ALLOWED_HOSTS"),
+                           trusted_proxies=read_trusted_proxies())
 add_sign_in_pages(app, OWN_SIGN_IN, "VideoDL")
 
 
@@ -108,6 +143,13 @@ add_sign_in_pages(app, OWN_SIGN_IN, "VideoDL")
 def hide_sign_in_pages_unless_used():
     if request.path in SIGN_IN_PATHS and sign_in_method() != "builtin":
         abort(404)
+    return None
+
+
+@app.before_request
+def refuse_foreign_host_names():
+    if sign_in_method() == "builtin" and not OWN_SIGN_IN.accepts_host(request.host):
+        return Response(WRONG_HOST_TEXT, status=MISDIRECTED_REQUEST, mimetype="text/plain")
     return None
 
 

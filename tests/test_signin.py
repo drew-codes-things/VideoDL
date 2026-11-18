@@ -1,3 +1,4 @@
+import ipaddress
 import os
 import stat
 import subprocess
@@ -39,6 +40,7 @@ def web(tmp_path, monkeypatch, clock):
     monkeypatch.setattr(app, "ALLOW_INSECURE", False)
     monkeypatch.setattr(app.OWN_SIGN_IN, "owner", OwnerAccount(tmp_path / "owner.json"))
     monkeypatch.setattr(app.OWN_SIGN_IN, "limiter", FailureLimiter(clock=clock))
+    monkeypatch.setattr(app.OWN_SIGN_IN, "device_limiter", FailureLimiter(clock=clock, before_strict=None))
     monkeypatch.setattr(app.OWN_SIGN_IN, "clock", clock)
     monkeypatch.setattr(app.OWN_SIGN_IN, "_setup_code", None)
     return app.app.test_client()
@@ -52,6 +54,11 @@ def set_up_owner(web, form=None, **kwargs):
 
 def sign_in(web, password=PASSWORD, **kwargs):
     return web.post("/signin", data={"user": OWNER_NAME, "password": password}, **kwargs)
+
+
+def forget_the_browser(web) -> None:
+    web.delete_cookie(COOKIE)
+    web.delete_cookie(COOKIE + "_device", path="/signin")
 
 
 def session_cookie(response) -> str:
@@ -94,7 +101,7 @@ def test_setup_needs_the_code_and_happens_once(web, tmp_path):
 
 def test_wrong_passwords_are_rate_limited(web):
     set_up_owner(web)
-    web.delete_cookie(COOKIE)
+    forget_the_browser(web)
     for _attempt in range(5):
         assert sign_in(web, password="wrong password!").status_code == 401
     assert sign_in(web).status_code == 429
@@ -121,7 +128,7 @@ def test_the_session_cookie_flags(web):
     local = set_up_owner(web)
     assert "HttpOnly" in session_cookie(local) and "SameSite=Lax" in session_cookie(local)
     assert "Secure" not in session_cookie(local)
-    remote = sign_in(web, base_url="http://videodl.example.com")
+    remote = sign_in(web, base_url="http://192.0.2.1")
     assert "Secure" in session_cookie(remote)
 
 
@@ -134,7 +141,7 @@ def test_the_gate_setting_keeps_the_proxy_in_charge(web, monkeypatch):
 
 
 def test_basic_credentials_still_win_when_set(web, monkeypatch):
-    monkeypatch.setattr(app, "WEB_USERNAME", "drew")
+    monkeypatch.setattr(app, "WEB_USERNAME", "basic-user")
     monkeypatch.setattr(app, "WEB_PASSWORD", "a long basic password")
     assert app.sign_in_method() == "basic"
     assert web.get("/").status_code == 401
@@ -177,3 +184,55 @@ def test_the_gate_and_basic_modes_need_no_key_file_and_take_any_key(tmp_path):
     assert import_app(tmp_path, ALLOW_INSECURE="true", SECRET_KEY="a", TRUSTED_PROXIES="0.0.0.0/0").returncode == 0
     assert import_app(tmp_path, WEB_USERNAME="basic-user", WEB_PASSWORD="a long basic password").returncode == 0
     assert not (tmp_path / "state" / "secret_key").exists()
+
+
+def test_allowed_hosts_and_trusted_proxies_come_from_the_environment(tmp_path):
+    shown = "app.OWN_SIGN_IN.accepts_host('localhost'), app.OWN_SIGN_IN.accepts_host('videodl.example.com'), " \
+            "app.OWN_SIGN_IN.client_address('192.0.2.10', {'X-Forwarded-For': '203.0.113.9'})"
+    started = import_app(tmp_path, shown, ALLOWED_HOSTS="videodl.example.com", TRUSTED_PROXIES="192.0.2.10")
+    assert started.returncode == 0, started.stderr
+    assert started.stdout.split() == ["False", "True", "203.0.113.9"]
+    assert import_app(tmp_path, shown).stdout.split() == ["True", "False", "192.0.2.10"]
+
+
+@pytest.mark.parametrize("value", ["0.0.0.0/0", "::/0", "10.0.0.5/8", "not-an-address"])
+def test_trusted_proxies_that_reach_too_far_are_refused(tmp_path, value):
+    started = import_app(tmp_path, TRUSTED_PROXIES=value)
+    assert started.returncode != 0
+    assert "TRUSTED_PROXIES" in started.stderr
+
+
+def test_a_rebinding_host_name_gets_421(web):
+    set_up_owner(web)
+    attacker = app.app.test_client()
+    for _attempt in range(6):
+        assert sign_in(attacker, password="wrong password!", base_url="http://rebind.evil.example:5002").status_code == 421
+    assert attacker.get("/status", base_url="http://rebind.evil.example:5002").status_code == 421
+    assert sign_in(attacker).status_code == 303
+
+
+def test_the_gate_mode_answers_on_any_host_name(web, monkeypatch):
+    monkeypatch.setattr(app, "ALLOW_INSECURE", True)
+    assert web.get("/", base_url="http://videodl.example.com").status_code == 200
+
+
+def test_a_browser_that_signed_in_before_is_not_locked_out_by_others(web):
+    set_up_owner(web)
+    assert web.post("/signout").status_code == 303
+    attacker = app.app.test_client()
+    for _attempt in range(5):
+        assert sign_in(attacker, password="wrong password!").status_code == 401
+    assert sign_in(attacker).status_code == 429
+    assert sign_in(web).status_code == 303
+
+
+def test_the_forwarded_address_counts_only_from_a_trusted_proxy(web, monkeypatch):
+    monkeypatch.setattr(app.OWN_SIGN_IN, "trusted_proxies", (ipaddress.ip_network("192.0.2.10"),))
+    set_up_owner(web)
+    via_proxy = {"REMOTE_ADDR": "192.0.2.10"}
+    attacker = app.app.test_client()
+    for _attempt in range(5):
+        sign_in(attacker, password="wrong password!", environ_base=via_proxy, headers={"X-Forwarded-For": "203.0.113.9"})
+    assert sign_in(attacker, environ_base=via_proxy, headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 429
+    owner = app.app.test_client()
+    assert sign_in(owner, environ_base=via_proxy, headers={"X-Forwarded-For": "198.51.100.4"}).status_code == 303

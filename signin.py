@@ -5,14 +5,17 @@ import binascii
 import collections
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
+import socket
 import tempfile
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,6 +25,7 @@ from werkzeug.http import parse_cookie
 
 OWNER_FILE_NAME = "owner.json"
 SESSION_SECONDS = 30 * 24 * 3600
+DEVICE_SECONDS = 365 * 24 * 3600
 MIN_PASSWORD_LENGTH = 10
 MAX_PASSWORD_LENGTH = 256
 MAX_FIELD_LENGTH = 512
@@ -32,12 +36,22 @@ SCRYPT_PARALLEL = 1
 SCRYPT_LENGTH = 32
 SALT_BYTES = 16
 GENERATION_BYTES = 16
+DEVICE_ID_BYTES = 16
 SETUP_CODE_BYTES = 9
 FAILURES_PER_ADDRESS = 5
+FAILURES_PER_DEVICE = 5
+FAILURES_BEFORE_STRICT = 100
+STRICT_FAILURES_PER_ADDRESS = 1
 FAILURE_WINDOW_SECONDS = 15 * 60
 MAX_TRACKED_ADDRESSES = 10000
+IPV6_NETWORK_BITS = 64
 SESSION_PURPOSE = b"owner session\x00"
+DEVICE_PURPOSE = b"owner device\x00"
+DEVICE_COOKIE_SUFFIX = "_device"
+FORWARDED_FOR_HEADER = "X-Forwarded-For"
 LOOPBACK_HOST_NAMES = ("localhost", "127.0.0.1", "::1")
+LOOPBACK_DOMAIN_SUFFIX = ".localhost"
+LOCAL_NETWORK_SUFFIX = ".local"
 SECURE_COOKIE_CHOICES = ("auto", "true", "false")
 SIGN_IN_PATH = "/signin"
 SETUP_PATH = "/setup"
@@ -121,6 +135,39 @@ def host_name(host: str) -> str:
         return ""
 
 
+def _is_address(name: str) -> bool:
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+@lru_cache(maxsize=1)
+def own_host_names() -> frozenset:
+    short = socket.gethostname().lower()
+    names = {short, socket.getfqdn().lower(), short.split(".")[0] + LOCAL_NETWORK_SUFFIX}
+    return frozenset(name for name in names if name and name != LOCAL_NETWORK_SUFFIX)
+
+
+def is_default_allowed_host(name: str) -> bool:
+    if name in LOOPBACK_HOST_NAMES or name.endswith(LOOPBACK_DOMAIN_SUFFIX) or _is_address(name):
+        return True
+    return name in own_host_names()
+
+
+def failure_bucket(address: str) -> str:
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    if parsed.version == 4:
+        return str(parsed)
+    if parsed.ipv4_mapped is not None:
+        return str(parsed.ipv4_mapped)
+    return str(ipaddress.IPv6Network((int(parsed), IPV6_NETWORK_BITS), strict=False))
+
+
 def _write_private_file(path: Path, record: dict) -> Path:
     descriptor, temporary = tempfile.mkstemp(prefix=".owner-", dir=path.parent)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -184,39 +231,73 @@ class OwnerAccount:
 
 
 class FailureLimiter:
-    def __init__(self, clock=time.monotonic, per_address: int = FAILURES_PER_ADDRESS, window: float = FAILURE_WINDOW_SECONDS):
+    def __init__(self, clock=time.monotonic, per_address: int = FAILURES_PER_ADDRESS, window: float = FAILURE_WINDOW_SECONDS,
+                 before_strict: int | None = FAILURES_BEFORE_STRICT, max_tracked: int = MAX_TRACKED_ADDRESSES):
         self.clock = clock
         self.per_address = per_address
         self.window = window
+        self.before_strict = before_strict
+        self.max_tracked = max_tracked
         self._lock = threading.Lock()
         self._failures: collections.OrderedDict[str, collections.deque] = collections.OrderedDict()
+        self._everyone: collections.deque = collections.deque()
 
-    def _recent(self, address: str) -> collections.deque:
-        moments = self._failures.get(address) or collections.deque()
-        cutoff = self.clock() - self.window
-        while moments and moments[0] <= cutoff:
-            moments.popleft()
-        return moments
+    def _forget_old(self, now: float) -> None:
+        cutoff = now - self.window
+        while self._everyone and self._everyone[0] <= cutoff:
+            self._everyone.popleft()
+        for key in list(self._failures):
+            moments = self._failures[key]
+            while moments and moments[0] <= cutoff:
+                moments.popleft()
+            if not moments:
+                del self._failures[key]
 
-    def seconds_blocked(self, address: str) -> int:
+    def _is_strict(self) -> bool:
+        return self.before_strict is not None and len(self._everyone) >= self.before_strict
+
+    def _seconds_left(self, moments, now: float) -> int:
+        limit = STRICT_FAILURES_PER_ADDRESS if self._is_strict() else self.per_address
+        if not moments or len(moments) < limit:
+            return 0
+        return max(1, int(moments[len(moments) - limit] + self.window - now) + 1)
+
+    def _make_room(self, now: float) -> int:
+        if len(self._failures) < self.max_tracked:
+            return 0
+        unblocked = next((key for key, moments in self._failures.items() if not self._seconds_left(moments, now)), None)
+        if unblocked is not None:
+            del self._failures[unblocked]
+            return 0
+        return min(self._seconds_left(moments, now) for moments in self._failures.values())
+
+    def seconds_blocked(self, key: str) -> int:
         with self._lock:
-            moments = self._recent(address)
-            if len(moments) < self.per_address:
-                return 0
-            return max(1, int(moments[0] + self.window - self.clock()) + 1)
+            now = self.clock()
+            self._forget_old(now)
+            return self._seconds_left(self._failures.get(key), now)
 
-    def failed(self, address: str) -> None:
+    def take_turn(self, key: str) -> int:
         with self._lock:
-            moments = self._recent(address)
-            moments.append(self.clock())
-            self._failures.pop(address, None)
-            self._failures[address] = moments
-            while len(self._failures) > MAX_TRACKED_ADDRESSES:
-                self._failures.popitem(last=False)
+            now = self.clock()
+            self._forget_old(now)
+            moments = self._failures.get(key)
+            wait = self._seconds_left(moments, now) if moments else self._make_room(now)
+            if wait:
+                return wait
+            moments = moments if moments is not None else collections.deque()
+            moments.append(now)
+            self._failures[key] = moments
+            self._failures.move_to_end(key)
+            if self.before_strict is not None:
+                self._everyone.append(now)
+            return 0
 
-    def forget(self, address: str) -> None:
+    def succeeded(self, key: str) -> None:
         with self._lock:
-            self._failures.pop(address, None)
+            moments = self._failures.pop(key, None)
+            if moments and self.before_strict is not None and moments[-1] in self._everyone:
+                self._everyone.remove(moments[-1])
 
 
 def _encode(data: dict) -> str:
@@ -233,21 +314,48 @@ def _decode(text: str) -> dict | None:
 
 class PasswordAuth:
     def __init__(self, owner: OwnerAccount, secret: bytes, cookie_name: str, secure_cookies: str = "auto",
-                 allowed_hosts=(), clock=time.time, limiter: FailureLimiter | None = None):
+                 allowed_hosts=(), clock=time.time, limiter: FailureLimiter | None = None, trusted_proxies=(),
+                 device_limiter: FailureLimiter | None = None):
         if secure_cookies not in SECURE_COOKIE_CHOICES:
             raise ValueError(f"secure_cookies must be one of {', '.join(SECURE_COOKIE_CHOICES)}, got {secure_cookies!r}")
         self.owner = owner
         self.secret = secret
         self.cookie_name = cookie_name
+        self.device_cookie_name = cookie_name + DEVICE_COOKIE_SUFFIX
         self.secure_cookies = secure_cookies
         self.allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
+        self.trusted_proxies = tuple(ipaddress.ip_network(entry, strict=False) for entry in trusted_proxies)
         self.clock = clock
         self.limiter = limiter or FailureLimiter()
+        self.device_limiter = device_limiter or FailureLimiter(per_address=FAILURES_PER_DEVICE, before_strict=None)
         self._setup_code: str | None = None
         self._setup_lock = threading.Lock()
 
     def accepts_host(self, host: str) -> bool:
-        return not self.allowed_hosts or host_name(host) in self.allowed_hosts
+        name = host_name(host)
+        if self.allowed_hosts:
+            return name in self.allowed_hosts
+        return is_default_allowed_host(name)
+
+    def _is_trusted_proxy(self, address: str) -> bool:
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError:
+            return False
+        return any(parsed in network for network in self.trusted_proxies)
+
+    def client_address(self, peer: str, headers) -> str:
+        if not self._is_trusted_proxy(peer):
+            return peer
+        client = peer
+        for hop in reversed((headers.get(FORWARDED_FOR_HEADER) or "").split(",")):
+            try:
+                client = str(ipaddress.ip_address(hop.strip()))
+            except ValueError:
+                return client
+            if not self._is_trusted_proxy(client):
+                return client
+        return client
 
     def needs_setup(self) -> bool:
         return not self.owner.exists()
@@ -255,12 +363,17 @@ class PasswordAuth:
     def entry_path(self) -> str:
         return SETUP_PATH if self.needs_setup() else SIGN_IN_PATH
 
-    def setup_code(self) -> str:
+    def setup_code(self) -> str | None:
         with self._setup_lock:
-            if self._setup_code is None:
+            if self._setup_code is None and self.needs_setup():
                 self._setup_code = secrets.token_urlsafe(SETUP_CODE_BYTES)
                 log.warning("no owner account yet: open %s and enter the setup code %s", SETUP_PATH, self._setup_code)
             return self._setup_code
+
+    def _spend_setup_code(self, used: str) -> None:
+        with self._setup_lock:
+            if self._setup_code == used:
+                self._setup_code = None
 
     def _signature(self, payload: str) -> str:
         return hmac.new(self.secret, SESSION_PURPOSE + payload.encode(), hashlib.sha256).hexdigest()
@@ -289,32 +402,56 @@ class PasswordAuth:
     def user_for(self, remote_address: str, headers) -> str | None:
         return self.user_for_token(parse_cookie(headers.get("Cookie") or "").get(self.cookie_name))
 
-    def _refuse_if_blocked(self, address: str) -> None:
-        wait = self.limiter.seconds_blocked(address)
+    def _device_signature(self, device_id: str) -> str:
+        return hmac.new(self.secret, DEVICE_PURPOSE + device_id.encode(), hashlib.sha256).hexdigest()
+
+    def new_device_token(self) -> str:
+        device_id = secrets.token_urlsafe(DEVICE_ID_BYTES)
+        return f"{device_id}.{self._device_signature(device_id)}"
+
+    def device_for_token(self, token) -> str | None:
+        if not isinstance(token, str) or not token.isascii() or token.count(".") != 1:
+            return None
+        device_id, signature = token.split(".")
+        if not device_id or not hmac.compare_digest(self._device_signature(device_id), signature):
+            return None
+        return device_id
+
+    def _take_turn(self, limiter: FailureLimiter, key: str) -> None:
+        wait = limiter.take_turn(key)
         if wait:
             raise SignInError(f"too many wrong attempts, try again in {wait // 60 + 1} min", status=429, retry_after=wait)
 
-    def sign_in(self, user, password, address: str) -> str:
+    def _sign_in_bucket(self, address: str, device_token) -> tuple[FailureLimiter, str]:
+        device_id = self.device_for_token(device_token)
+        if device_id is not None:
+            return self.device_limiter, device_id
+        return self.limiter, failure_bucket(address)
+
+    def sign_in(self, user, password, address: str, device_token=None) -> str:
         if not isinstance(user, str) or not isinstance(password, str) or len(user) > MAX_FIELD_LENGTH or len(password) > MAX_PASSWORD_LENGTH:
             raise SignInError("the user name or password is too long")
-        self._refuse_if_blocked(address)
+        limiter, key = self._sign_in_bucket(address, device_token)
+        self._take_turn(limiter, key)
         record = self.owner.check(user.strip(), password)
         if record is None:
-            self.limiter.failed(address)
             log.warning("wrong sign-in from %s", address)
             raise SignInError(WRONG_DETAILS_TEXT, status=401)
-        self.limiter.forget(address)
+        limiter.succeeded(key)
         return self._start_session(record)
 
     def set_up(self, code, user, password, confirm, address: str) -> str:
-        if not self.needs_setup():
+        expected = self.setup_code() if self.needs_setup() else None
+        if expected is None:
             raise SignInError("setup is already finished", status=403)
-        self._refuse_if_blocked(address)
-        if not isinstance(code, str) or not hmac.compare_digest(code.strip().encode(), self.setup_code().encode()):
-            self.limiter.failed(address)
+        key = failure_bucket(address)
+        self._take_turn(self.limiter, key)
+        if not isinstance(code, str) or not hmac.compare_digest(code.strip().encode(), expected.encode()):
             log.warning("wrong setup code from %s", address)
             raise SignInError("that setup code is wrong; the app writes it to its log when it starts", status=401)
+        self.limiter.succeeded(key)
         record = self.owner.create(clean_user_name(user), check_new_password(password, confirm))
+        self._spend_setup_code(expected)
         log.info("owner account %r made from %s", record["user"], address)
         return self._start_session(record)
 
@@ -377,10 +514,17 @@ def add_sign_in_pages(app: Flask, auth: PasswordAuth, app_name: str) -> None:
                  f"Use at least {MIN_PASSWORD_LENGTH} characters for the password.")
         return _page(app_name, "Set up", intro, form, problem, status)
 
+    def client_address() -> str:
+        return auth.client_address(request.remote_addr or "", request.headers)
+
     def signed_in(token: str) -> Response:
+        is_secure = auth.cookie_is_secure(request.is_secure, request.host)
         response = redirect(f"{SIGN_IN_PATH}?{SIGNED_IN_CHECK}=1", code=303)
         response.set_cookie(auth.cookie_name, token, max_age=SESSION_SECONDS, path="/", httponly=True, samesite="Lax",
-                            secure=auth.cookie_is_secure(request.is_secure, request.host))
+                            secure=is_secure)
+        if auth.device_for_token(request.cookies.get(auth.device_cookie_name)) is None:
+            response.set_cookie(auth.device_cookie_name, auth.new_device_token(), max_age=DEVICE_SECONDS, path=SIGN_IN_PATH,
+                                httponly=True, samesite="Lax", secure=is_secure)
         return response
 
     def refused(error: SignInError, page) -> Response:
@@ -408,7 +552,8 @@ def add_sign_in_pages(app: Flask, auth: PasswordAuth, app_name: str) -> None:
         if auth.needs_setup():
             return redirect(SETUP_PATH, code=303)
         try:
-            token = auth.sign_in(_field("user"), _field("password"), request.remote_addr or "")
+            token = auth.sign_in(_field("user"), _field("password"), client_address(),
+                                 request.cookies.get(auth.device_cookie_name))
         except SignInError as error:
             return refused(error, sign_in_page)
         return signed_in(token)
@@ -424,7 +569,7 @@ def add_sign_in_pages(app: Flask, auth: PasswordAuth, app_name: str) -> None:
         if not _is_same_origin():
             return setup_page("this form was sent from another site", 403)
         try:
-            token = auth.set_up(_field("code"), _field("user"), _field("password"), _field("confirm"), request.remote_addr or "")
+            token = auth.set_up(_field("code"), _field("user"), _field("password"), _field("confirm"), client_address())
         except SignInError as error:
             if error.status == 403:
                 return redirect(SIGN_IN_PATH, code=303)
