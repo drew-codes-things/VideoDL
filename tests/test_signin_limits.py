@@ -346,6 +346,17 @@ def test_an_owner_file_from_before_device_keys_still_works(tmp_path, clock):
     assert auth.sign_in(OWNER_NAME, PASSWORD, OWNER_ADDRESS, device)
 
 
+def test_a_device_cookie_from_an_old_owner_file_ends_with_the_owner_account(tmp_path, clock):
+    auth = new_auth(tmp_path, clock)
+    set_up(auth)
+    record = auth.owner.read()
+    del record["device_key"]
+    auth.owner.path.write_text(json.dumps(record))
+    device = auth.new_device_token()
+    auth.owner.path.unlink()
+    assert auth.device_for_token(device) is None
+
+
 def test_an_owner_file_with_an_odd_device_key_is_reported(tmp_path, clock):
     auth = new_auth(tmp_path, clock)
     set_up(auth)
